@@ -158,7 +158,11 @@ class TextInputActivity : Activity() {
             // way to send is the button — a coin flip the user has to learn.
             maxLines = 1
             inputType = InputType.TYPE_CLASS_TEXT
-            imeOptions = EditorInfo.IME_ACTION_SEND
+            // NO_EXTRACT_UI: a fullscreen extract editor (landscape / some
+            // Chinese IMEs) replaces this field and then has nothing to commit
+            // into once the overlay moves. The candidate row stays on the
+            // keyboard, which is the one the user can see.
+            imeOptions = EditorInfo.IME_ACTION_SEND or EditorInfo.IME_FLAG_NO_EXTRACT_UI
             setPadding(dp(4), 0, dp(4), 0)
             setOnEditorActionListener { _, actionId, _ ->
                 if (actionId == EditorInfo.IME_ACTION_SEND) {
@@ -380,6 +384,9 @@ class TextInputActivity : Activity() {
     override fun onResume() {
         super.onResume()
         resumed = true
+        // The back catcher is another activity of ours. If it is still resumed
+        // it owns the IME and Chinese input never reaches this field.
+        CardBackActivity.dismiss()
         // Here rather than in onCreate: the window has focus by now, and an IME
         // request from a window that does not is dropped without a word.
         field.requestFocus()

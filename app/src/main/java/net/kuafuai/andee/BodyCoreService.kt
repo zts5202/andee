@@ -375,6 +375,14 @@ class BodyCoreService : Service() {
                 dispatcher.compactForUser()
             }
 
+            override fun onExpandedChanged(expanded: Boolean) {
+                if (!expanded) {
+                    net.kuafuai.andee.ui.CardBackActivity.dismiss()
+                    return
+                }
+                syncBackCatcher()
+            }
+
             /**
              * Re-show a page from the scrollback, or read a message fullscreen.
              *
@@ -610,6 +618,9 @@ class BodyCoreService : Service() {
             if (it == 0) android.util.Log.i("Body", "field released the card")
             window.setTypingTop(it)
         }
+        // System Back while the card is up. The overlay does not receive it on
+        // HyperOS; the accessibility key filter and CardBackActivity both land here.
+        net.kuafuai.andee.ui.CardBackActivity.onFold = { foldCardFromBack() }
         asr = AsrController(
             this, audio, window,
             onTranscript = { text, userInitiated ->
@@ -1173,9 +1184,6 @@ class BodyCoreService : Service() {
             net.kuafuai.andee.ui.TextInputActivity.dismiss()
             return
         }
-        // Typing is a conversation, and the conversation is the full card: unfold first, the way the Mac's
-        // double-click brings the chat window up with the cursor in the box.
-        if (window.isCompact()) dispatcher.expand()
         // No keyboard to borrow and nothing to switch: the device's own IME is
         // the user's, and this field types on it like any other app's would.
         // The only way this fails is a tablet whose single IME is the headless
@@ -1188,7 +1196,41 @@ class BodyCoreService : Service() {
             return
         }
         typingFromFullscreen = true
-        net.kuafuai.andee.ui.TextInputActivity.start(this, then)
+        // Unfold and pull the overlay off the bottom of the screen before the
+        // activity exists. Starting it under a fullscreen card is what kept
+        // the IME off the EditText on HyperOS.
+        window.prepareForTyping {
+            net.kuafuai.andee.ui.CardBackActivity.dismiss()
+            net.kuafuai.andee.ui.TextInputActivity.start(this, then)
+        }
+    }
+
+    /**
+     * System Back should fold the expanded card, and nothing else.
+     *
+     * False while typing, while settings/vault is the focused card, while the
+     * ball is folded or hidden. Main thread: the window fields it reads are
+     * only written there, and both callers (the key filter, the catcher
+     * activity) are already on it.
+     */
+    fun wantsBackToFold(): Boolean {
+        if (exitRequested || ballHidden) return false
+        if (!::window.isInitialized || !window.wantsSystemBack()) return false
+        if (net.kuafuai.andee.ui.TextInputActivity.isShowing) return false
+        if (net.kuafuai.andee.ui.OwnCard.showing) return false
+        return true
+    }
+
+    /** Same fold as ✕. Returns false when Back should be left alone. */
+    fun foldCardFromBack(): Boolean {
+        if (!wantsBackToFold() || !::dispatcher.isInitialized) return false
+        dispatcher.compactForUser()
+        return true
+    }
+
+    private fun syncBackCatcher() {
+        if (wantsBackToFold()) net.kuafuai.andee.ui.CardBackActivity.ensure(this)
+        else net.kuafuai.andee.ui.CardBackActivity.dismiss()
     }
 
     /**
@@ -1208,7 +1250,7 @@ class BodyCoreService : Service() {
      * a better reason than the user's place does.
      */
     private fun typingFinished() {
-        window.setTypingTop(0)
+        window.endTypingSession()
         window.setAway(false)
         if (typingFromFullscreen && !window.isCompact()) dispatcher.expand()
         typingFromFullscreen = false
@@ -1640,6 +1682,14 @@ class BodyCoreService : Service() {
      */
     fun noteForegroundPackage(pkg: String) {
         maybeAutoEnterScene(pkg)
+        // The card is up but some other app is the focused window again
+        // (HyperOS drops a translucent or just-started catcher). Bring the
+        // catcher back so the next gesture still folds. Our own package is the
+        // catcher or the typing field — leaving it alone is what keeps the
+        // keyboard from being paused.
+        if (pkg != packageName && wantsBackToFold()) {
+            net.kuafuai.andee.ui.CardBackActivity.ensure(this)
+        }
     }
 
     /** An accessibility event, still ours to interpret. See [ScreenController.noteEvent]. */
@@ -1683,6 +1733,8 @@ class BodyCoreService : Service() {
         scenesUi?.hide()
         scenesUi = null
         net.kuafuai.andee.config.VoiceConfig.onSceneChanged = null
+        net.kuafuai.andee.ui.CardBackActivity.onFold = null
+        net.kuafuai.andee.ui.CardBackActivity.dismiss()
         // Before the windows go: this one has to put the keyboard back, and a
         // service that dies mid-typing would otherwise leave the tablet with
         // its keyboard on the user's IME — where every future `type_text`
@@ -3694,6 +3746,7 @@ class BodyCoreService : Service() {
     private fun hideBallForUser() {
         if (exitRequested) return
         ballHidden = true
+        net.kuafuai.andee.ui.CardBackActivity.dismiss()
         if (::window.isInitialized) window.hide()
         if (::ripple.isInitialized) ripple.hide()
         if (::marker.isInitialized) marker.hide()

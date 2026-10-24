@@ -242,6 +242,20 @@
              screen. Not noHistory: that finishes it the moment the camera or
              the photo picker opens, and their result would have nowhere to
              land. onStop does the same job and knows when not to. -->
+        <!-- Focused window for system Back while the card is expanded.
+             The overlay never receives HyperOS gesture-back. This activity
+             does, and it folds the card instead of finishing the service.
+             Opaque (not translucent) so the ROM keeps it in the back chain;
+             the card overlay is what the user sees. -->
+        <activity
+            android:name=".ui.CardBackActivity"
+            android:theme="@style/Theme.Body.BackCatch"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:taskAffinity=""
+            android:exported="false"
+            android:enableOnBackInvokedCallback="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard|screenLayout" />
         <activity
             android:name=".ui.TextInputActivity"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"

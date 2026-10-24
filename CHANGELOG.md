@@ -4,7 +4,7 @@ Notable changes to Andee. The format follows [Keep a Changelog](https://keepacha
 
 ## Versioning policy
 
-- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`15` / `"0.5.6"`**.
+- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`16` / `"0.5.7"`**.
 - Releases are tagged `vMAJOR.MINOR.PATCH`, `versionName` mirrors the tag without the leading `v`,
   and `versionCode` increases by one per release. `versionCode` must increase **monotonically** or
   Android refuses the upgrade; the same number must never be reused for two different builds.
@@ -27,6 +27,15 @@ anything not built at a tag, identify it by the short commit hash it was built f
 hash into `versionName` at build time would close this hole; it is not implemented yet.)
 
 ## [Unreleased]
+
+## [0.5.7] - 2026-10-24
+
+System Back on the expanded card folds it, on a device where the overlay never receives the gesture. Double-tap typing can take Chinese again. Folded size and step-aside are unchanged.
+
+### Fixed
+
+- **Back folds the card on HyperOS.** Clearing `FLAG_NOT_FOCUSABLE` on the overlay did not: focus stayed on the app behind it, so the key and the gesture never arrived. The overlay is not-focusable again. While the card is expanded, `ScreenBodyService.onKeyEvent` consumes `KEYCODE_BACK` before that app, and `CardBackActivity` is the focused window the gesture actually targets. Both call the same `compactForUser` path as ✕. They do not stop the service. A folded ball, the typing field, and the settings/vault cards do not take Back.
+- **Double-tap typing no longer covers the field.** The overlay is pulled above the input — and marked not-touchable — before `TextInputActivity` starts. Its height is the field's screen top minus the overlay frame's real top, so a `MATCH_PARENT` window that starts under the status bar does not extend into the EditText or the candidate row. `IME_FLAG_NO_EXTRACT_UI` keeps a Chinese IME from swapping in a fullscreen extract editor.
 
 ## [0.5.6] - 2026-10-24
 

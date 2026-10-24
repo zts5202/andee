@@ -8,12 +8,10 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.ColorDrawable
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
-import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -207,6 +205,15 @@ class FloatingWindowUi(
 
         /** ⤡ in the subtitle band — the user asking for the screen back. */
         fun onMinimizeClick()
+
+        /**
+         * The card became the fullscreen surface, or folded back to the ball.
+         *
+         * Back is not delivered to this overlay on HyperOS (focus stays on the
+         * app behind it), so the service uses this to hold or drop the activity
+         * that actually receives the gesture. Default no-op.
+         */
+        fun onExpandedChanged(expanded: Boolean) {}
 
         /**
          * Two taps on the ball — the user wants to type instead of talk.
@@ -441,6 +448,13 @@ class FloatingWindowUi(
 
     /** The window geometry [setTypingTop] borrowed, to be put back. */
     private var typingGeometry: IntArray? = null
+
+    /**
+     * A typing field is being opened or is open. Set before the activity
+     * starts, cleared only when the field is gone — not when the keyboard
+     * blips to 0 — so the overlay stays out of the EditText the whole time.
+     */
+    private var typingSession = false
     private var gesturePassthrough = false
 
     /** Whether the compositor is blurring behind us. See [Glass.frost]. */
@@ -891,6 +905,49 @@ class FloatingWindowUi(
      *
      * Main thread only, via the usual post.
      */
+    /**
+     * Move the overlay off the typing field *before* the activity and the IME
+     * exist. HyperOS does not pass touches through an overlay rectangle, so
+     * [FLAG_NOT_TOUCHABLE] alone still eats the EditText. The measured edge
+     * ([setTypingTop]) replaces this guess once the keyboard has a height.
+     *
+     * Runs the unfold on this same turn when the ball was folded: posting it
+     * separately let the activity start under a still-fullscreen card.
+     */
+    fun prepareForTyping(onReady: () -> Unit) {
+        ui.post {
+            if (root == null) return@post
+            typingSession = true
+            if (compact) {
+                compact = false
+                syncCover()
+                exitCompact()
+                listeners.onExpandedChanged(true)
+            }
+            applyTypingClearance(provisionalStripTop())
+            applyWindow()
+            onReady()
+        }
+    }
+
+    /** The field is gone. Put the card back and let Back fold it again. */
+    fun endTypingSession() {
+        ui.post {
+            typingSession = false
+            if (typingTop != 0 || typingGeometry != null) {
+                typingTop = 0
+                applyTypingTop()
+            } else {
+                applyWindow()
+            }
+            listeners.onExpandedChanged(root != null && !compact)
+        }
+    }
+
+    /** Main thread. System Back should fold the card. */
+    fun wantsSystemBack(): Boolean =
+        root != null && !compact && !away && !typingSession && typingTop == 0
+
     fun setTypingTop(topPx: Int) {
         ui.post {
             if (typingTop == topPx) return@post
@@ -900,19 +957,11 @@ class FloatingWindowUi(
     }
 
     private fun applyTypingTop() {
-        val v = root ?: return
-        val p = params ?: return
+        if (root == null || params == null) return
         if (typingTop > 0) {
             // Folded, the window is a corner square that is nowhere near the
             // field; there is nothing to step aside from.
-            if (compact) return
-            if (typingGeometry == null) {
-                typingGeometry = intArrayOf(p.x, p.y, p.width, p.height)
-            }
-            p.height = maxOf(dp(MIN_TYPING_CARD_DP), typingTop)
-            // The real field is up now, right under this edge: the pill would be a second, dead copy of it.
-            inputPill?.visibility = View.INVISIBLE
-            runCatching { wm.updateViewLayout(v, p) }
+            if (!compact) applyTypingClearance(typingTop)
         } else if (compact) {
             // A fold in between owns the geometry now; just forget the snapshot.
             typingGeometry = null
@@ -921,6 +970,46 @@ class FloatingWindowUi(
         }
         // The flags change with it: see [applyWindow].
         applyWindow()
+    }
+
+    /**
+     * End the overlay above [stripTopOnScreen].
+     *
+     * A `MATCH_PARENT` overlay's frame does not start at `p.y`. On phones it
+     * starts at the content frame (status-bar height, measured 126 px on an
+     * Honor with `p.y = 0`). Setting `height` to the strip's screen Y then
+     * extends that many pixels *into* the field, which is the EditText and the
+     * Chinese candidate row. Subtract the frame's real top, and never apply a
+     * minimum that crosses the strip — a short card is usable, a covered field
+     * is not.
+     */
+    private fun applyTypingClearance(stripTopOnScreen: Int) {
+        val v = root ?: return
+        val p = params ?: return
+        if (compact) return
+        if (typingGeometry == null) {
+            typingGeometry = intArrayOf(p.x, p.y, p.width, p.height)
+        }
+        val margin = dp(8)
+        val safe = (stripTopOnScreen - frameTopOnScreen() - margin).coerceAtLeast(dp(48))
+        p.height = safe
+        // The real field is up now, right under this edge: the pill would be a second, dead copy of it.
+        inputPill?.visibility = View.INVISIBLE
+        runCatching { wm.updateViewLayout(v, p) }
+    }
+
+    /** Where a keyboard, its candidate row and the field usually sit, before the first inset. */
+    private fun provisionalStripTop(): Int {
+        val screenH = context.resources.displayMetrics.heightPixels
+        return (screenH - dp(480)).coerceAtLeast(dp(160))
+    }
+
+    private fun frameTopOnScreen(): Int {
+        val v = root ?: return 0
+        if (!v.isLaidOut) return 0
+        val loc = IntArray(2)
+        v.getLocationOnScreen(loc)
+        return loc[1].coerceAtLeast(0)
     }
 
     /** Put back the geometry [setTypingBand] borrowed. */
@@ -943,7 +1032,7 @@ class FloatingWindowUi(
             ui.removeCallbacks(strollRunnable)
             slide?.cancel()
             parkedFrom = null
-            disarmBack(v)
+            listeners.onExpandedChanged(false)
             wm.removeView(v)
             root = null
             params = null
@@ -1329,6 +1418,9 @@ class FloatingWindowUi(
             if (this.away == away) return@post
             this.away = away
             applyWindow()
+            // The camera / picker must get Back. Coming back, the expanded
+            // card needs the catcher again.
+            listeners.onExpandedChanged(root != null && !compact && !this.away)
         }
     }
 
@@ -1357,6 +1449,7 @@ class FloatingWindowUi(
             syncCover()
             if (compact) enterCompact() else exitCompact()
             applyWindow()
+            listeners.onExpandedChanged(!compact && root != null)
         }
     }
 
@@ -2273,23 +2366,19 @@ class FloatingWindowUi(
         // status bar sitting on a band of the user's wallpaper. Measured, not
         // assumed: with the flag the window's top is the display's top and
         // [winYOrigin] measures 0 by itself.
-        // Back only while this window is the expanded card. FLAG_NOT_FOCUSABLE
-        // drops every key, including the system Back gesture, so the card used
-        // to never see it. The folded ball stays not-focusable: a 28 dp window
-        // that took focus would steal Back from the app the user is in.
-        // Typing and an injected gesture also stay not-focusable — the field
-        // and the app being driven need the keys.
-        val receiveBack = !compact && typingTop == 0 && !away && !gesturePassthrough
-        val base = WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-            (if (receiveBack) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-        // Untouchable while a typing field is up, even though the window no
-        // longer overlaps it: the field's top edge is *derived* from the
-        // keyboard's height, which changes as the IME animates and as 搜狗's
-        // toolbar row comes and goes. Being a few pixels late would put this
-        // window over the top row of the field and eat the taps aimed at it —
-        // and the card has nothing to offer during a typing session anyway.
-        p.flags = if (gesturePassthrough || typingTop > 0) {
+        // Always not-focusable. Making the expanded card focusable did not
+        // receive HyperOS gesture-back (focus stayed on the app behind the
+        // overlay) and it kept the typing activity from owning the IME.
+        // Back is caught by the accessibility service and by [CardBackActivity].
+        val base = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+        // Untouchable while a typing field is up. On HyperOS that flag does
+        // not by itself pass touches through the rectangle — [applyTypingClearance]
+        // is what actually uncovers the EditText — but a late inset must not
+        // put this window over the top row of the field either.
+        val yieldToField = !compact && (typingSession || typingTop > 0)
+        p.flags = if (gesturePassthrough || yieldToField) {
             base or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         } else {
             base
@@ -2315,88 +2404,7 @@ class FloatingWindowUi(
         // the battery icon sit on top of `◈` and `✕`, and those are the two
         // controls the user cannot do without.
         insetTopBar()
-        // Focusable before the flag update, or the window can miss the first
-        // requestFocus: a not-focusable view in a newly focusable window does
-        // not take the keys.
-        if (receiveBack) {
-            v.isFocusable = true
-            v.isFocusableInTouchMode = true
-        }
         runCatching { wm.updateViewLayout(v, p) }
-        syncBackReception(receiveBack)
-    }
-
-    /**
-     * System Back on the expanded card is the same fold as ✕
-     * ([Listeners.onMinimizeClick] → `compactForUser`). It does not stop the
-     * service. Idempotent: a key and an [android.window.OnBackInvokedCallback]
-     * can both fire for one gesture, and the second finds the card already
-     * folding.
-     */
-    private fun foldFromBack() {
-        if (compact) return
-        listeners.onMinimizeClick()
-    }
-
-    /** Held as [Any] so API 30 never resolves [android.window.OnBackInvokedCallback] at class load. */
-    private var backCallback: Any? = null
-    private var backArmed = false
-
-    /**
-     * Focus the expanded card and register for Back. The flag change in
-     * [applyWindow] is what makes the window eligible; without focus the
-     * gesture still goes to the app underneath.
-     */
-    private fun syncBackReception(want: Boolean) {
-        val v = root ?: return
-        if (!want) {
-            if (backArmed || backCallback != null) disarmBack(v)
-            return
-        }
-        v.isFocusable = true
-        v.isFocusableInTouchMode = true
-        if (!backArmed) {
-            backArmed = true
-            // The flag update is posted to the window manager. Focusing on the
-            // next loop is usually enough; one more pass covers a dispatcher
-            // that is still null until the view is attached.
-            v.post { claimBack(v, retries = 1) }
-        } else if (backCallback == null) {
-            armBackCallback(v)
-        }
-    }
-
-    private fun claimBack(v: View, retries: Int) {
-        if (!backArmed || root !== v || compact) return
-        if (!v.hasFocus()) v.requestFocus()
-        if (armBackCallback(v) || retries <= 0) return
-        v.post { claimBack(v, retries - 1) }
-    }
-
-    /** @return false when API 33+ has no dispatcher yet and the caller should retry. */
-    private fun armBackCallback(v: View): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || backCallback != null) return true
-        val dispatcher = v.findOnBackInvokedDispatcher() ?: return false
-        val cb = android.window.OnBackInvokedCallback { foldFromBack() }
-        dispatcher.registerOnBackInvokedCallback(
-            android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-            cb,
-        )
-        backCallback = cb
-        return true
-    }
-
-    private fun disarmBack(v: View) {
-        backArmed = false
-        v.isFocusable = false
-        v.isFocusableInTouchMode = false
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val cb = backCallback as? android.window.OnBackInvokedCallback
-            if (cb != null) {
-                v.findOnBackInvokedDispatcher()?.unregisterOnBackInvokedCallback(cb)
-                backCallback = null
-            }
-        }
     }
 
     /**
@@ -2903,19 +2911,6 @@ class FloatingWindowUi(
         var ballAreaView: View? = null
 
         /**
-         * System Back folds the expanded card. [ViewRootImpl] delivers the key
-         * here, the root of the overlay, so a focused child cannot swallow it
-         * first. The compact ball is not focusable and does not get this.
-         */
-        override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-            if (!compact && event.keyCode == KeyEvent.KEYCODE_BACK) {
-                if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) foldFromBack()
-                return true
-            }
-            return super.dispatchKeyEvent(event)
-        }
-
-        /**
          * The card is two stacked areas — ball on top, scrollback under it —
          * and the split is only computable here, where the card's real height
          * exists. Driving it from the fold transitions instead would read
@@ -3277,17 +3272,6 @@ class FloatingWindowUi(
          * tablet it is the whole offset.
          */
         private const val BALL_NUDGE_DP = 26
-
-        /**
-         * Floor for the card's height while a typing field is up — see
-         * [setTypingTop].
-         *
-         * Reached only on a device whose keyboard eats most of the screen: the
-         * card is meant to keep its ball and some of its scrollback visible
-         * above the field, and a card clipped to nothing would be the "it
-         * vanished" behaviour this replaced.
-         */
-        private const val MIN_TYPING_CARD_DP = 240
 
         /**
          * Compact window side, dp. This square **is** the ball.

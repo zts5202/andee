@@ -2,6 +2,7 @@ package net.kuafuai.andee
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import java.util.concurrent.atomic.AtomicReference
 
@@ -45,6 +46,11 @@ class ScreenBodyService : AccessibilityService() {
         // would turn ordinary tablet taps into TalkBack-style exploration.
         serviceInfo = serviceInfo.apply {
             flags = flags and AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE.inv()
+            // So Back reaches us before the focused app. Gesture-back on HyperOS
+            // often still injects KEYCODE_BACK; when it does not, CardBackActivity
+            // is the focused window. Set here so an already-enabled service picks
+            // it up without a toggle. Other keys are not consumed.
+            flags = flags or AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
         }
         // The body first, then the hand. `start` is asynchronous, so on a cold
         // device `get()` is still null one line later — the body pulls the
@@ -69,6 +75,22 @@ class ScreenBodyService : AccessibilityService() {
     }
 
     override fun onInterrupt() {}
+
+    /**
+     * System Back while the card is expanded folds it, the same as ✕.
+     *
+     * This runs before the focused app sees the key, which is the whole point:
+     * the overlay never becomes that app on HyperOS. Consumed only for Back,
+     * and only while [BodyCoreService.wantsBackToFold] is true — a folded ball,
+     * a typing field, or settings must still get the key.
+     */
+    override fun onKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode != KeyEvent.KEYCODE_BACK) return false
+        val body = BodyCoreService.get() ?: return false
+        if (!body.wantsBackToFold()) return false
+        if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) body.foldCardFromBack()
+        return true
+    }
 
     /**
      * Forwarded, not interpreted.
