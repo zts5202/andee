@@ -110,14 +110,17 @@ object OwnCard {
  * Whether the assistant's own card is unfolded over the whole display.
  *
  * A second way to get zero nodes, by a different mechanism than [OwnCard] and
- * with a different answer. The card is `FLAG_NOT_FOCUSABLE`, so it never
- * becomes the active window and the app behind it stays focused and keeps its
- * root — but it *covers* the display, and every node of an occluded window
- * reports `isVisibleToUser == false`. [ScreenController.buildNode] drops those
- * before it counts them, so `nodes_total` is 0 with a perfectly healthy tree
- * underneath. Measured on this device: with the card unfolded, Chrome's window
- * is present, `active`, `focused`, `root: true` and yields 0 nodes; folding the
- * card returns 75 from the same screen.
+ * with a different answer. The card *covers* the display, and every node of an
+ * occluded window reports `isVisibleToUser == false`. [ScreenController.buildNode]
+ * drops those before it counts them, so `nodes_total` is 0 with a perfectly
+ * healthy tree underneath. Measured on this device before the card took focus
+ * so Back could fold it: with the card unfolded, Chrome's window is present,
+ * `active`, `focused`, `root: true` and yields 0 nodes; folding the card
+ * returns 75 from the same screen. The empty dump is the cover. The expanded
+ * card drops `FLAG_NOT_FOCUSABLE` on purpose ([FloatingWindowUi] so system Back
+ * reaches it and folds like ✕); the compact ball puts the flag back. Restoring
+ * the flag on the expanded card would make Back a no-op and would not fill
+ * this dump.
  *
  * It exists because that is the same signature [ScreenController.reviveNote]
  * reads as a stale accessibility connection, and it sent a user off to toggle a

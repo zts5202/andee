@@ -4,7 +4,7 @@ Notable changes to Andee. The format follows [Keep a Changelog](https://keepacha
 
 ## Versioning policy
 
-- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`14` / `"0.5.5"`**.
+- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`15` / `"0.5.6"`**.
 - Releases are tagged `vMAJOR.MINOR.PATCH`, `versionName` mirrors the tag without the leading `v`,
   and `versionCode` increases by one per release. `versionCode` must increase **monotonically** or
   Android refuses the upgrade; the same number must never be reused for two different builds.
@@ -27,6 +27,14 @@ anything not built at a tag, identify it by the short commit hash it was built f
 hash into `versionName` at build time would close this hole; it is not implemented yet.)
 
 ## [Unreleased]
+
+## [0.5.6] - 2026-10-24
+
+System Back on the expanded card folds it to the corner ball. The service stays up. Folded size and step-aside are unchanged.
+
+### Fixed
+
+- **Back folds the card.** While the card is open, the system Back key and the back gesture do the same thing as the top-right ✕: `onMinimizeClick` → `compactForUser` → `setCompact(true)`. They do not stop the service or accessibility. The expanded card drops `FLAG_NOT_FOCUSABLE`, takes focus, and consumes Back (`KEYCODE_BACK` on the overlay root, plus an `OnBackInvokedCallback` on API 33+). The compact ball stays not-focusable. `COMPACT_DP` is still 28, and 先躲开 / 回来 is unchanged.
 
 ## [0.5.5] - 2026-10-24
 

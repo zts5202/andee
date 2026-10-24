@@ -8,10 +8,12 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.ColorDrawable
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -941,6 +943,7 @@ class FloatingWindowUi(
             ui.removeCallbacks(strollRunnable)
             slide?.cancel()
             parkedFrom = null
+            disarmBack(v)
             wm.removeView(v)
             root = null
             params = null
@@ -2270,9 +2273,16 @@ class FloatingWindowUi(
         // status bar sitting on a band of the user's wallpaper. Measured, not
         // assumed: with the flag the window's top is the display's top and
         // [winYOrigin] measures 0 by itself.
-        val base = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+        // Back only while this window is the expanded card. FLAG_NOT_FOCUSABLE
+        // drops every key, including the system Back gesture, so the card used
+        // to never see it. The folded ball stays not-focusable: a 28 dp window
+        // that took focus would steal Back from the app the user is in.
+        // Typing and an injected gesture also stay not-focusable — the field
+        // and the app being driven need the keys.
+        val receiveBack = !compact && typingTop == 0 && !away && !gesturePassthrough
+        val base = WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            (if (receiveBack) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
         // Untouchable while a typing field is up, even though the window no
         // longer overlaps it: the field's top edge is *derived* from the
         // keyboard's height, which changes as the IME animates and as 搜狗's
@@ -2305,7 +2315,88 @@ class FloatingWindowUi(
         // the battery icon sit on top of `◈` and `✕`, and those are the two
         // controls the user cannot do without.
         insetTopBar()
+        // Focusable before the flag update, or the window can miss the first
+        // requestFocus: a not-focusable view in a newly focusable window does
+        // not take the keys.
+        if (receiveBack) {
+            v.isFocusable = true
+            v.isFocusableInTouchMode = true
+        }
         runCatching { wm.updateViewLayout(v, p) }
+        syncBackReception(receiveBack)
+    }
+
+    /**
+     * System Back on the expanded card is the same fold as ✕
+     * ([Listeners.onMinimizeClick] → `compactForUser`). It does not stop the
+     * service. Idempotent: a key and an [android.window.OnBackInvokedCallback]
+     * can both fire for one gesture, and the second finds the card already
+     * folding.
+     */
+    private fun foldFromBack() {
+        if (compact) return
+        listeners.onMinimizeClick()
+    }
+
+    /** Held as [Any] so API 30 never resolves [android.window.OnBackInvokedCallback] at class load. */
+    private var backCallback: Any? = null
+    private var backArmed = false
+
+    /**
+     * Focus the expanded card and register for Back. The flag change in
+     * [applyWindow] is what makes the window eligible; without focus the
+     * gesture still goes to the app underneath.
+     */
+    private fun syncBackReception(want: Boolean) {
+        val v = root ?: return
+        if (!want) {
+            if (backArmed || backCallback != null) disarmBack(v)
+            return
+        }
+        v.isFocusable = true
+        v.isFocusableInTouchMode = true
+        if (!backArmed) {
+            backArmed = true
+            // The flag update is posted to the window manager. Focusing on the
+            // next loop is usually enough; one more pass covers a dispatcher
+            // that is still null until the view is attached.
+            v.post { claimBack(v, retries = 1) }
+        } else if (backCallback == null) {
+            armBackCallback(v)
+        }
+    }
+
+    private fun claimBack(v: View, retries: Int) {
+        if (!backArmed || root !== v || compact) return
+        if (!v.hasFocus()) v.requestFocus()
+        if (armBackCallback(v) || retries <= 0) return
+        v.post { claimBack(v, retries - 1) }
+    }
+
+    /** @return false when API 33+ has no dispatcher yet and the caller should retry. */
+    private fun armBackCallback(v: View): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || backCallback != null) return true
+        val dispatcher = v.findOnBackInvokedDispatcher() ?: return false
+        val cb = android.window.OnBackInvokedCallback { foldFromBack() }
+        dispatcher.registerOnBackInvokedCallback(
+            android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+            cb,
+        )
+        backCallback = cb
+        return true
+    }
+
+    private fun disarmBack(v: View) {
+        backArmed = false
+        v.isFocusable = false
+        v.isFocusableInTouchMode = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val cb = backCallback as? android.window.OnBackInvokedCallback
+            if (cb != null) {
+                v.findOnBackInvokedDispatcher()?.unregisterOnBackInvokedCallback(cb)
+                backCallback = null
+            }
+        }
     }
 
     /**
@@ -2810,6 +2901,19 @@ class FloatingWindowUi(
     private inner class BallHostFrame(ctx: Context) : FrameLayout(ctx) {
         /** Set by [build]; used to constrain touch hit-testing to the ball area. */
         var ballAreaView: View? = null
+
+        /**
+         * System Back folds the expanded card. [ViewRootImpl] delivers the key
+         * here, the root of the overlay, so a focused child cannot swallow it
+         * first. The compact ball is not focusable and does not get this.
+         */
+        override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+            if (!compact && event.keyCode == KeyEvent.KEYCODE_BACK) {
+                if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) foldFromBack()
+                return true
+            }
+            return super.dispatchKeyEvent(event)
+        }
 
         /**
          * The card is two stacked areas — ball on top, scrollback under it —
