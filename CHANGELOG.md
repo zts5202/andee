@@ -4,7 +4,7 @@ Notable changes to Andee. The format follows [Keep a Changelog](https://keepacha
 
 ## Versioning policy
 
-- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`12` / `"0.5.3"`**.
+- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`13` / `"0.5.4"`**.
 - Releases are tagged `vMAJOR.MINOR.PATCH`, `versionName` mirrors the tag without the leading `v`,
   and `versionCode` increases by one per release. `versionCode` must increase **monotonically** or
   Android refuses the upgrade; the same number must never be reused for two different builds.
@@ -27,6 +27,19 @@ anything not built at a tag, identify it by the short commit hash it was built f
 hash into `versionName` at build time would close this hole; it is not implemented yet.)
 
 ## [Unreleased]
+
+## [0.5.4] - 2026-10-24
+
+The corner ball was a window big enough to cover a chat, and two more windows sat on the screen at alpha 0 doing the same thing. This makes the folded ball the size of the ball, and gives a way to take it off the screen without stopping the assistant.
+
+### Added
+
+- **Step aside, from the foreground notification.** While the ball is up the row has **先躲开 / Step aside**. That hides the overlays and leaves the service, the microphone and accessibility running — it is not the voice exit, which still stops the body. While it is hidden the row says so, and tapping the notification (or **回来 / Come back**) puts the **compact** ball back. The launcher icon is the other way back, and that one opens the card. Hide is not saved: a process restart comes back with the ball showing. A meeting that is still recording says so in the shade, because the triple-tap that ends it needs the ball.
+
+### Fixed
+
+- **Folded, the window is the ball.** `COMPACT_DP` is 84 (252 px at density 480, the Redmi K90 Pro Max). The rendered sphere fills that square; horns that stick out clip at the edge rather than growing the window. Blur behind is off in this shape, and `blurBehindRadius` is cleared with the flag — leaving the radius set is what `dumpsys window` was still reporting as 144.
+- **No idle fullscreen overlay, and no idle tap-marker box.** The edge glow and the tap ring are added only while they are actually drawing, and removed when they go idle, when a capture or an injected gesture needs the screen, or when the ball steps aside. An alpha-0 `MATCH_PARENT` window and an alpha-0 144 dp box were both still in the window list, and on HyperOS both ate touches underneath.
 
 ## [0.5.3] - 2026-10-22
 

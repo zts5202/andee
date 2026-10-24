@@ -458,8 +458,12 @@
     <string name="body_notify_title">I\'m here</string>
     <string name="body_notify_text_ok">Screen control is up.</string>
     <string name="body_notify_text_no_screen">Accessibility was switched off, so I can\'t reach the screen. Tap the action to get it back.</string>
+    <string name="body_notify_text_hidden">I\'m out of the way, still running. Tap this notification and I\'m back.</string>
+    <string name="body_notify_text_hidden_meeting">I\'m out of the way and still recording. Tap this notification and I\'m back; triple-tap the ball to stop.</string>
     <string name="body_notify_action_fix">Get it back</string>
     <string name="body_notify_action_see">Let me see the screen</string>
+    <string name="body_notify_action_hide">Step aside</string>
+    <string name="body_notify_action_show">Come back</string>
     <string name="cmd_vault_filling">Typing the “%2$s” for %1$s…</string>
     <string name="cmd_ask_yes">OK</string>
     <string name="cmd_ask_no">No thanks</string>

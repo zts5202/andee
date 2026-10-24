@@ -85,6 +85,10 @@ import kotlin.random.Random
  *   - Scrollback (bottom): its own touches, so it can scroll
  *   - Anywhere outside the circle in the ball area: passes through
  *
+ * Compact is not that layout. The folded window is only the ball — see
+ * [COMPACT_DP] — because an overlay does not forward a touch that lands inside
+ * its frame, however much of that frame is transparent.
+ *
  * Tap opens the mic and nothing else — deliberately not "tap, then unfold to
  * talk": the corner ball is there so you can ask about what you are looking
  * at, and covering it again to do so defeats it. Recognition state shows on
@@ -103,6 +107,7 @@ import kotlin.random.Random
  * in the bottom-right corner, which is what the card becomes — and stays —
  * whenever the assistant is driving the device underneath (every `screen.*`
  * command folds the card before it runs), plus whenever the user asks with ⤡.
+ * The compact window is that ball's own square, not a larger frame around it.
  * Both routes reach it through [setCompact]; the way back is a long-press on
  * the ball ([Listeners.onLongPress]) with exactly one caller that does not
  * wait for one: the service unfolds once at birth, so a device that just
@@ -612,6 +617,10 @@ class FloatingWindowUi(
             params = p
             syncCover()
             applyCompactAppearance()
+            // show() is the compact window. [setCompact] is a no-op from this
+            // state, so the blur, alpha and touch flags have to be applied
+            // here — a later fold that finds them already right is the point.
+            applyWindow()
             // Only now can [winYOrigin] be measured, and the resting position
             // depends on it — the y above is a first guess that is correct only
             // where the offset is 0.
@@ -696,11 +705,10 @@ class FloatingWindowUi(
             View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
         )
-        // The tail tip reaches into the ball area's transparent padding, down
-        // to where the renderer's raised paws are — that overlap is what makes
-        // the board read as held rather than as hovering a thumb's width
-        // above the head.
-        val overlap = (side * SIGN_OVERLAP_FRACTION).toInt()
+        // The sphere fills the ball area, so the tail only needs a few dp of
+        // overlap to read as held. The old fraction was calibrated against a
+        // large transparent pad; using it now would bury the tail in the head.
+        val overlap = dp(SIGN_OVERLAP_DP)
         val h = content.measuredHeight + side - overlap
         // Ball keeps its spot. If it is hanging off the ledge, use the
         // climb-back target: holding a sign and gripping a ledge are two
@@ -1523,10 +1531,10 @@ class FloatingWindowUi(
             val area: View = v.ballAreaView ?: v
             val loc = IntArray(2)
             area.getLocationOnScreen(loc)
-            // The same two numbers the renderer uses: the sphere is a fixed
-            // fraction of the surface's shorter side, times the view scale the
-            // ball is drawn at (1f when folded — see applyCompactAppearance).
-            val scale = if (compact) 1f else BALL_SCALE
+            // The same two numbers the renderer uses, times the view scale.
+            // Folded, that scale fills the window with the sphere — see
+            // [COMPACT_BALL_SCALE].
+            val scale = if (compact) COMPACT_BALL_SCALE else BALL_SCALE
             val r = (min(area.width, area.height) * SPHERE_RADIUS_FRACTION * scale).toInt()
             val cx = loc[0] + area.width / 2
             // The sphere may be drawn below the area's centre while it is
@@ -1610,7 +1618,7 @@ class FloatingWindowUi(
      */
     private fun perchY(): Int {
         val side = dp(COMPACT_DP)
-        val r = side * SPHERE_RADIUS_FRACTION
+        val r = visualRadiusPx().toFloat()
         val edge = bottomEdge()
         return (edge + r * (2f * CLING_HIDDEN - 1f) - side / 2f).toInt() - winYOrigin
     }
@@ -1664,15 +1672,29 @@ class FloatingWindowUi(
     }
 
     /**
-     * Transparent margin between the compact window's edge and the drawn
-     * sphere, px. The sphere is [SPHERE_RADIUS_FRACTION] of the side and centred,
-     * so most of the window is empty air — which is why clamping the *window* to
-     * the screen would strand the ball a thumb's width short of every edge.
-     * Clamp against this instead and the ball can sit flush.
+     * Gap between the compact window's edge and the drawn sphere, px.
+     *
+     * With [COMPACT_BALL_SCALE] the sphere fills the window, so this is ~0.
+     * Clamping against the old unscaled pad would let most of the ball slide
+     * off the screen.
      */
     private fun spherePad(): Int {
         val side = dp(COMPACT_DP)
-        return side / 2 - (side * SPHERE_RADIUS_FRACTION).toInt()
+        return (side / 2 - visualRadiusPx()).coerceAtLeast(0)
+    }
+
+    /**
+     * Radius of the sphere as drawn in the compact window, px.
+     *
+     * [COMPACT_BALL_SCALE] blows the renderer's fixed fraction up until the
+     * sphere fills the window. Layout that still used the unscaled fraction
+     * would keep a thumb of "transparent air" in every clamp and then let the
+     * ball slide that far off the screen.
+     */
+    private fun visualRadiusPx(): Int {
+        val side = dp(COMPACT_DP)
+        val frac = SPHERE_RADIUS_FRACTION * COMPACT_BALL_SCALE
+        return (side * frac).toInt().coerceIn(1, side / 2)
     }
 
     /**
@@ -1697,8 +1719,7 @@ class FloatingWindowUi(
      */
     private fun wantsPerch(y: Int): Boolean {
         val side = dp(COMPACT_DP)
-        val sphereBottom = y + winYOrigin + windowH() - side / 2 +
-            (side * SPHERE_RADIUS_FRACTION).toInt()
+        val sphereBottom = y + winYOrigin + windowH() - side / 2 + visualRadiusPx()
         return sphereBottom >= bottomEdge() - dp(SNAP_GRACE_DP)
     }
 
@@ -1902,8 +1923,11 @@ class FloatingWindowUi(
      * larger, harder-edged, and unable to squash or hop with the ball it is
      * supposed to be part of.
      *
-     * Ball at view scale 1: [BALL_SCALE] is the full card's magnification, and
-     * a corner square has nothing to magnify into.
+     * Ball at [COMPACT_BALL_SCALE]: the renderer's sphere is a fixed fraction
+     * of the surface, and that fraction left most of this square transparent.
+     * Scaling the view up fills the square with the sphere. Horns and gestures
+     * that stick out clip at the window edge — growing the window to keep them
+     * would put a touch-eating margin back around the ball.
      *
      * Main thread only.
      */
@@ -1914,15 +1938,15 @@ class FloatingWindowUi(
         sceneChip?.visibility = View.GONE
         muteKey?.visibility = View.GONE
         // Not just invisible — GONE, so the ball area has the whole window to
-        // itself. A scrollback left in the layout would cover most of a 168dp
-        // square and there would be nothing left to see the ball in.
+        // itself. A scrollback left in the layout would cover the square and
+        // there would be nothing left to see the ball in.
         historyView?.visibility = View.GONE
         tipsView?.visibility = View.GONE
         // The whole square is the ball's, so the sphere is centred in it and
         // sized against it.
         setBallAreaHeight(FrameLayout.LayoutParams.MATCH_PARENT)
-        ball?.scaleX = 1f
-        ball?.scaleY = 1f
+        ball?.scaleX = COMPACT_BALL_SCALE
+        ball?.scaleY = COMPACT_BALL_SCALE
         // The corner square has no cluster to dodge, so the ball sits dead
         // centre again — and the fold animation lands from wherever it was.
         ball?.translationY = 0f
@@ -2261,7 +2285,7 @@ class FloatingWindowUi(
             base
         }
         // Blur behind only while the card is actually a card. Folded, the
-        // window is a 168 dp square around the ball and blurring behind *that*
+        // window is the ball's own square and blurring behind *that*
         // is a smudge following the ball around; hidden for a capture, the
         // window is at alpha 0 but the compositor would still be asked to
         // defocus what is behind it — and what is behind it is exactly the
@@ -2906,7 +2930,7 @@ class FloatingWindowUi(
             // room for) — it used to claim the whole window because a disc was
             // painted there, and without the disc that would be an invisible
             // square in the corner eating the user's taps.
-            val scale = if (compact) 1f else BALL_SCALE
+            val scale = if (compact) COMPACT_BALL_SCALE else BALL_SCALE
             val r = min(width, ballH) * 0.32f * scale
             val dx = x - cx
             val dy = y - cy
@@ -2926,9 +2950,10 @@ class FloatingWindowUi(
                         if (e.y < areaTop) return false   // the pane's own touch
                         if (!isOnBall(e.x, e.y, ballH)) return false
                     } else if (compact) {
-                        // Bare folded ball: circle test only, the whole window
-                        // is the area.
-                        if (!isOnBall(e.x, e.y, ballH)) return false
+                        // The window is the ball's own square. Every point in
+                        // it is the ball — there is no transparent margin, and
+                        // returning false would not give those pixels to the
+                        // app underneath anyway.
                     } else {
                         // Full card: ignore anything below the ball area (the
                         // scrollback handles its own touches); then the circle.
@@ -3161,12 +3186,26 @@ class FloatingWindowUi(
         private const val MIN_TYPING_CARD_DP = 240
 
         /**
-         * Compact window side and its inset from the screen corner. The sphere
-         * is a fixed fraction of the surface's shorter side, so this is the
-         * only knob for how big the corner ball reads — the rendered ball is
-         * roughly two thirds of it, and the circular hit test tracks it too.
+         * Compact window side, dp. This square **is** the ball.
+         *
+         * An overlay does not forward a touch that lands inside its frame, so
+         * a window larger than the sphere — the old 136 dp square around a
+         * ~65 dp ball, and the 168 dp one before that — steals every tap in
+         * the transparent margin. [COMPACT_BALL_SCALE] fills this side with
+         * the sphere. 84 dp is 252 px at density 480.
          */
-        private const val COMPACT_DP = 136
+        private const val COMPACT_DP = 84
+
+        /**
+         * View scale that makes the rendered sphere fill [COMPACT_DP].
+         *
+         * The renderer draws the sphere at [SPHERE_RADIUS_FRACTION] of the
+         * surface (diameter ~0.48 of the side). Scaling by the inverse fills
+         * the window. Anything that sticks out past the silhouette — horns,
+         * a wave — clips at the edge rather than inflating the frame.
+         */
+        private const val COMPACT_BALL_SCALE = 0.5f / SPHERE_RADIUS_FRACTION
+
         private const val COMPACT_MARGIN_DP = 16
 
         /** How long [parkForGesture] waits for the main-thread move to run. */
@@ -3176,17 +3215,14 @@ class FloatingWindowUi(
         private const val PARK_SETTLE_MS = 50L
 
         /**
-         * How much of the ball area's padding a held signboard's tail reaches
-         * into, as a fraction of the compact side. The sphere occupies ~64% of
-         * the area, centred, so the padding above the head is ~18% of the side.
+         * How far a held signboard's tail reaches into the ball, dp.
          *
-         * Calibrated on device, not by eye: 0.30 measured a 9px overlap with
-         * the head ("戳到脑袋"), 0.14 read as detached. Each 0.01 of the
-         * fraction is ~3.8px on the test phone, so 0.235 targets a ~14px
-         * clearance — the tail tip visibly *near* the head without touching,
-         * which is what "举着" reads as.
+         * The sphere fills the ball area, so the old fraction of the side
+         * (calibrated against a transparent pad above the head) would bury
+         * the tail in the face. A few dp is enough for the board to read as
+         * held rather than hovering.
          */
-        private const val SIGN_OVERLAP_FRACTION = 0.235f
+        private const val SIGN_OVERLAP_DP = 8
 
         private const val PERCH_SLIDE_MS = 240L
 

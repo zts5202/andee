@@ -489,16 +489,21 @@
 
         It is the only surface the app has that survives accessibility being
         revoked, so it is also the only place the way back can live. Wording
-        rule: with the screen it is a statement with nothing to do; without it
-        it says what is actually broken and offers exactly one action.
+        rule: with the screen and the ball up, one action steps aside; with
+        the ball hidden, the row itself brings it back; without the screen it
+        says what is actually broken and offers the fix.
     -->
     <string name="body_notify_channel">我在运行</string>
     <string name="body_notify_channel_desc">常驻的一行，说明我还在。屏幕操作掉线时，回来的路也在这里。</string>
     <string name="body_notify_title">我在</string>
     <string name="body_notify_text_ok">屏幕操作已就绪。</string>
     <string name="body_notify_text_no_screen">无障碍被系统关掉了，我现在碰不到屏幕。点右边接回来。</string>
+    <string name="body_notify_text_hidden">我先躲开了，还在。点一下通知我就回来。</string>
+    <string name="body_notify_text_hidden_meeting">我先躲开了，录音还在。点一下通知我就回来，三下小球能停。</string>
     <string name="body_notify_action_fix">接回来</string>
     <string name="body_notify_action_see">允许看屏幕</string>
+    <string name="body_notify_action_hide">先躲开</string>
+    <string name="body_notify_action_show">回来</string>
 
     <!-- net/CommandDispatcher.kt — the three lines from it a user can see. -->
     <string name="cmd_vault_filling">正在填入「%1$s」的%2$s…</string>

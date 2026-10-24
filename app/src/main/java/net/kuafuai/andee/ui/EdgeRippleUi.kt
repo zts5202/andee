@@ -44,9 +44,13 @@ import kotlin.math.min
  * untrusted non-touchable overlay to exactly 0.80. So this window plus the card
  * — also non-touchable while a gesture runs — compute to
  * `1 - 0.2 * 0.2 = 0.96` and every tap `ScreenController` injects gets thrown
- * away. Hence [applyWindow]: the window sits at alpha 0 unless the glow is
- * actually drawing, and [setVisibleForGesture] takes it out of the sum for the
- * ~1.5 s the glow keeps breathing after a screenshot.
+ * away. [setVisibleForGesture] takes the window down for the ~1.5 s the glow
+ * keeps breathing after a screenshot.
+ *
+ * Alpha 0 is not enough. A `MATCH_PARENT` overlay left in the window list at
+ * alpha 0 still ate touches across the whole screen on HyperOS (measured,
+ * Redmi K90 Pro Max), FLAG_NOT_TOUCHABLE included. The window exists only
+ * while the glow is actually on screen — see [syncPresence].
  */
 class EdgeRippleUi(private val context: Context) {
 
@@ -56,15 +60,47 @@ class EdgeRippleUi(private val context: Context) {
 
     private var view: RippleView? = null
     private var params: WindowManager.LayoutParams? = null
+    private var attached = false
 
-    // Folded into the window alpha by [applyWindow]. Main thread only.
+    // Folded into whether the window exists at all by [syncPresence]. Main thread only.
     private var captureHidden = false
     private var gestureHidden = false
 
-    /** Whether the view is still drawing frames — see [applyWindow]. */
+    /** Whether the view is still drawing frames — see [syncPresence]. */
     private var glowing = false
 
+    /** What [setBreathing] last asked for. Distinct from [glowing], which stays
+     *  true through the fade so a stale idle callback cannot tear down a breath
+     *  that just restarted. */
+    private var breathWanted = false
+
+    /** [hide] until the next [show]. A breath posted across that gap must not add a window. */
+    private var closed = false
+
+    /**
+     * Nothing to put on screen yet. The window is created on the first breath.
+     * Kept so startup and [net.kuafuai.andee.BodyCoreService.ensureOverlays]
+     * can keep calling it.
+     */
     fun show(): Boolean {
+        closed = false
+        return true
+    }
+
+    fun hide(): Boolean {
+        closed = true
+        breathWanted = false
+        glowing = false
+        captureHidden = false
+        gestureHidden = false
+        detach()
+        view = null
+        params = null
+        return true
+    }
+
+    /** Build the view the first time a breath wants it. Does not add a window. */
+    private fun ensureView(): Boolean {
         if (view != null) return true
         val v = RippleView(context) { onGlowIdle() }
         val p = WindowManager.LayoutParams(
@@ -78,31 +114,34 @@ class EdgeRippleUi(private val context: Context) {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = 0; y = 0
-            alpha = 0f
+            alpha = 1f
         }
-        return try {
-            v.hideFromAccessibility()
+        v.hideFromAccessibility()
+        view = v
+        params = p
+        return true
+    }
+
+    private fun attach() {
+        val v = view ?: return
+        val p = params ?: return
+        if (attached) return
+        p.alpha = 1f
+        try {
             wm.addView(v, p)
-            view = v
-            params = p
+            attached = true
+            v.invalidate()
             android.util.Log.i("Body", "edge ripple window added")
-            true
         } catch (t: Throwable) {
             android.util.Log.e("Body", "edge ripple addView failed", t)
-            false
         }
     }
 
-    fun hide(): Boolean {
-        val v = view ?: return true
-        return try {
-            wm.removeView(v)
-            view = null
-            params = null
-            true
-        } catch (_: Throwable) {
-            false
-        }
+    private fun detach() {
+        val v = view ?: return
+        if (!attached) return
+        runCatching { wm.removeView(v) }
+        attached = false
     }
 
     /**
@@ -112,11 +151,22 @@ class EdgeRippleUi(private val context: Context) {
      */
     fun setBreathing(on: Boolean) {
         ui.post {
+            if (closed) return@post
+            breathWanted = on
             if (on) {
+                if (!ensureView()) return@post
                 glowing = true
-                applyWindow()
+                view?.setBreathing(true)
+                syncPresence()
+            } else {
+                view?.setBreathing(false)
+                // Detached, nothing is drawing the fade, so the idle callback
+                // will never arrive. Drop the window now.
+                if (view == null || !attached) {
+                    glowing = false
+                    detach()
+                }
             }
-            view?.setBreathing(on)
         }
     }
 
@@ -127,7 +177,7 @@ class EdgeRippleUi(private val context: Context) {
      * mid-breath when the capture is done.
      */
     fun setVisibleForCapture(visible: Boolean) {
-        ui.post { captureHidden = !visible; applyWindow() }
+        ui.post { captureHidden = !visible; syncPresence() }
     }
 
     /**
@@ -136,28 +186,33 @@ class EdgeRippleUi(private val context: Context) {
      * the untrusted-touch ceiling and the tap silently never lands.
      */
     fun setVisibleForGesture(visible: Boolean) {
-        ui.post { gestureHidden = !visible; applyWindow() }
+        ui.post { gestureHidden = !visible; syncPresence() }
     }
 
     /** Main thread only. */
     private fun onGlowIdle() {
-        if (!glowing) return
+        if (breathWanted) return
         glowing = false
-        applyWindow()
+        detach()
     }
 
     /**
-     * Main thread only. An idle glow has to leave the window at alpha 0 rather
-     * than just draw nothing: the platform bills us for the window's opacity,
-     * not its pixels.
+     * Put the window up only while the glow is allowed to be seen.
+     *
+     * A capture or an injected gesture takes it down immediately — an alpha-0
+     * fullscreen window is what was blocking the screen underneath. The fade
+     * out stays attached: [setBreathing] leaves [glowing] set until this view
+     * reports idle, and only then is the window removed.
+     *
+     * Main thread only.
      */
-    private fun applyWindow() {
-        val v = view ?: return
-        val p = params ?: return
-        val want = if (captureHidden || gestureHidden || !glowing) 0f else 1f
-        if (p.alpha == want) return
-        p.alpha = want
-        runCatching { wm.updateViewLayout(v, p) }
+    private fun syncPresence() {
+        if (closed || captureHidden || gestureHidden || !glowing) {
+            detach()
+            return
+        }
+        if (!ensureView()) return
+        attach()
     }
 
     /**
