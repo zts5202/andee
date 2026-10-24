@@ -4,7 +4,7 @@ Notable changes to Andee. The format follows [Keep a Changelog](https://keepacha
 
 ## Versioning policy
 
-- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`13` / `"0.5.4"`**.
+- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`14` / `"0.5.5"`**.
 - Releases are tagged `vMAJOR.MINOR.PATCH`, `versionName` mirrors the tag without the leading `v`,
   and `versionCode` increases by one per release. `versionCode` must increase **monotonically** or
   Android refuses the upgrade; the same number must never be reused for two different builds.
@@ -27,6 +27,14 @@ anything not built at a tag, identify it by the short commit hash it was built f
 hash into `versionName` at build time would close this hole; it is not implemented yet.)
 
 ## [Unreleased]
+
+## [0.5.5] - 2026-10-24
+
+The folded ball from 0.5.4 was still too big on the Redmi K90. It is a third of that size. Stepping aside from the notification is unchanged.
+
+### Fixed
+
+- **Folded ball is 28 dp.** `COMPACT_DP` was 84 (252 px at density 480) and is now 28 (84 px at the same density). The window is still the sphere's own square: blur stays off, and there is still no idle fullscreen overlay. 28 dp is under the 48 dp touch-target suggestion. The window is not padded out to meet it, because that padding would eat taps under the ball. Touch slop is only the distance a finger may move before a hold becomes a drag (~8 dp); the finger that lands on the square keeps the gesture, so the ball stays tappable and draggable.
 
 ## [0.5.4] - 2026-10-24
 

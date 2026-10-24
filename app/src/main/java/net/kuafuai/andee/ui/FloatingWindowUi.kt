@@ -3189,12 +3189,21 @@ class FloatingWindowUi(
          * Compact window side, dp. This square **is** the ball.
          *
          * An overlay does not forward a touch that lands inside its frame, so
-         * a window larger than the sphere — the old 136 dp square around a
-         * ~65 dp ball, and the 168 dp one before that — steals every tap in
-         * the transparent margin. [COMPACT_BALL_SCALE] fills this side with
-         * the sphere. 84 dp is 252 px at density 480.
+         * a window larger than the sphere steals every tap in the transparent
+         * margin. [COMPACT_BALL_SCALE] fills this side with the sphere.
+         * 28 dp is 84 px at density 480 — a third of the 84 dp / 252 px window
+         * that was still too big on the Redmi K90.
+         *
+         * 28 dp is under the 48 dp Material touch-target suggestion. The
+         * window is not grown to meet it. Touch slop
+         * ([ViewConfiguration.getScaledTouchSlop], about 8 dp) is how far a
+         * finger may move before a hold becomes a drag, not a minimum size,
+         * and the view that took ACTION_DOWN keeps the rest of the gesture
+         * even after the finger leaves the square. A larger invisible hit
+         * area would be a larger touch-blocking frame, which is the bug this
+         * size exists to avoid.
          */
-        private const val COMPACT_DP = 84
+        private const val COMPACT_DP = 28
 
         /**
          * View scale that makes the rendered sphere fill [COMPACT_DP].
