@@ -376,10 +376,9 @@ class BodyCoreService : Service() {
             }
 
             override fun onExpandedChanged(expanded: Boolean) {
-                if (!expanded) {
-                    net.kuafuai.andee.ui.CardBackActivity.dismiss()
-                    return
-                }
+                // Park on the way down, bring the catcher back on the way up.
+                // Dismissing here finished the activity on every fold, so the
+                // next unfold was a cold start in the same moment as the resize.
                 syncBackCatcher()
             }
 
@@ -1200,7 +1199,12 @@ class BodyCoreService : Service() {
         // activity exists. Starting it under a fullscreen card is what kept
         // the IME off the EditText on HyperOS.
         window.prepareForTyping {
-            net.kuafuai.andee.ui.CardBackActivity.dismiss()
+            // Keys must not come through the accessibility service, and the
+            // catcher must not stay resumed — it would own the IME. Park,
+            // don't finish: finishing is a cold start the next time the card
+            // opens.
+            ScreenBodyService.setKeyFilter(false)
+            net.kuafuai.andee.ui.CardBackActivity.park()
             net.kuafuai.andee.ui.TextInputActivity.start(this, then)
         }
     }
@@ -1224,13 +1228,40 @@ class BodyCoreService : Service() {
     /** Same fold as ✕. Returns false when Back should be left alone. */
     fun foldCardFromBack(): Boolean {
         if (!wantsBackToFold() || !::dispatcher.isInitialized) return false
+        // Off before the card has shrunk. A folded ball that still filters
+        // keys makes every key in the app underneath wait on this process.
+        ScreenBodyService.setKeyFilter(false)
         dispatcher.compactForUser()
         return true
     }
 
+    private val backCatcherTick = Runnable { syncBackCatcherNow() }
+
+    /**
+     * Line the back catcher up with the card.
+     *
+     * Folding parks immediately, under the card if it has not shrunk yet, so
+     * the user never sees that window. Unfolding starts it on the next frame:
+     * `startActivity` in the same turn as the overlay resize is the hitch
+     * between the ball and the card. Hiding the ball and stopping the service
+     * still [net.kuafuai.andee.ui.CardBackActivity.dismiss] — park would leave
+     * a resumed window with nothing on screen to explain it.
+     */
     private fun syncBackCatcher() {
-        if (wantsBackToFold()) net.kuafuai.andee.ui.CardBackActivity.ensure(this)
-        else net.kuafuai.andee.ui.CardBackActivity.dismiss()
+        ui.removeCallbacks(backCatcherTick)
+        if (!wantsBackToFold()) {
+            ScreenBodyService.setKeyFilter(false)
+            net.kuafuai.andee.ui.CardBackActivity.park()
+            return
+        }
+        ui.post(backCatcherTick)
+    }
+
+    private fun syncBackCatcherNow() {
+        val want = wantsBackToFold()
+        ScreenBodyService.setKeyFilter(want)
+        if (want) net.kuafuai.andee.ui.CardBackActivity.ensure(this)
+        else net.kuafuai.andee.ui.CardBackActivity.park()
     }
 
     /**
@@ -1688,7 +1719,9 @@ class BodyCoreService : Service() {
         // catcher or the typing field — leaving it alone is what keeps the
         // keyboard from being paused.
         if (pkg != packageName && wantsBackToFold()) {
-            net.kuafuai.andee.ui.CardBackActivity.ensure(this)
+            // Posted and coalesced. Calling ensure() from the event itself
+            // started the catcher again on every window change.
+            syncBackCatcher()
         }
     }
 

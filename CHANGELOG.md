@@ -4,7 +4,7 @@ Notable changes to Andee. The format follows [Keep a Changelog](https://keepacha
 
 ## Versioning policy
 
-- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`16` / `"0.5.7"`**.
+- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`17` / `"0.5.8"`**.
 - Releases are tagged `vMAJOR.MINOR.PATCH`, `versionName` mirrors the tag without the leading `v`,
   and `versionCode` increases by one per release. `versionCode` must increase **monotonically** or
   Android refuses the upgrade; the same number must never be reused for two different builds.
@@ -27,6 +27,15 @@ anything not built at a tag, identify it by the short commit hash it was built f
 hash into `versionName` at build time would close this hole; it is not implemented yet.)
 
 ## [Unreleased]
+
+## [0.5.8] - 2026-10-25
+
+Typing and the ball-to-card switch were hitching. The card still folds on Back, the folded ball is still 28 dp, and step-aside is unchanged.
+
+### Fixed
+
+- **Typing no longer resizes the overlay on every key or candidate-bar twitch.** While the field is up, the accessibility service does not filter keys (that path delivers every IME commit to the main thread before the editor). The overlay still starts short of the field, and it still shrinks if a later inset would cover the EditText, but a jitter that leaves the field clear does not call `updateViewLayout`, and it does not frost or repaint the card. The keyboard dropping to 0 for a moment no longer grows the card back over the field; the height comes back once, when the field is gone.
+- **Opening and closing the card no longer starts and destroys an activity on that same frame.** The back catcher is parked with `moveTaskToBack` instead of `finish`, and the next unfold reorders it after the overlay has resized. Window-state bursts no longer call `startActivity` on the event itself. Hiding the ball and stopping the service still finish that activity.
 
 ## [0.5.7] - 2026-10-24
 

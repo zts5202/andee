@@ -27,10 +27,13 @@ import java.lang.ref.WeakReference
  */
 class CardBackActivity : Activity() {
 
-    private var handled = false
-
     @Volatile
     var resumed = false
+        private set
+
+    /** True after the first [onResume]. A parked window has this set; a start still in flight does not. */
+    @Volatile
+    var wasShown = false
         private set
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,6 +53,7 @@ class CardBackActivity : Activity() {
     override fun onResume() {
         super.onResume()
         resumed = true
+        wasShown = true
     }
 
     override fun onPause() {
@@ -64,21 +68,14 @@ class CardBackActivity : Activity() {
     }
 
     private fun fold() {
-        if (handled || isFinishing) return
-        val folded = onFold?.invoke() == true
-        if (!folded) {
-            // The card does not want this Back (typing, settings, already
-            // folded). Leave so the next one is not stuck on an invisible window.
-            handled = true
-            finish()
-            @Suppress("DEPRECATION")
-            overridePendingTransition(0, 0)
-            return
-        }
-        handled = true
-        finish()
-        @Suppress("DEPRECATION")
-        overridePendingTransition(0, 0)
+        if (isFinishing) return
+        // Ask the service to fold, then step behind without destroying the
+        // window. finish() here is a cold start on the next unfold, and that
+        // task switch is what made the card hitch. On a real fold the overlay
+        // is still fullscreen — compact is posted, not done — so this window
+        // goes away underneath it.
+        onFold?.invoke()
+        moveTaskToBack(true)
     }
 
     override fun onDestroy() {
@@ -92,17 +89,26 @@ class CardBackActivity : Activity() {
 
         /**
          * Fold the card. Returns false when Back should not fold (the service
-         * wires this). The activity finishes either way when it was the one
-         * that received the gesture and the fold was refused.
+         * wires this). The activity steps behind either way; it is not finished.
          */
         @Volatile
         var onFold: (() -> Boolean)? = null
 
         private var live: WeakReference<CardBackActivity>? = null
+        private var ensureAt = 0L
 
         fun ensure(context: Context) {
             val cur = live?.get()
             if (cur != null && !cur.isFinishing && cur.resumed) return
+            val now = android.os.SystemClock.uptimeMillis()
+            // Window-state events arrive in bursts while a page or the IME
+            // moves. Each one used to call startActivity again. A window that
+            // has already been shown and then parked is a real unfold — that
+            // one must not wait out the burst throttle, or a quick fold and
+            // unfold would leave Back with nobody to catch it.
+            val inFlight = cur == null || cur.isFinishing || !cur.wasShown
+            if (inFlight && now - ensureAt < 700) return
+            ensureAt = now
             val intent = Intent(context, CardBackActivity::class.java)
                 .addFlags(
                     Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -112,6 +118,14 @@ class CardBackActivity : Activity() {
                 )
             runCatching { context.startActivity(intent) }
                 .onFailure { Log.w(TAG, "back catcher not started", it) }
+        }
+
+        /** Leave the foreground without destroying the window. */
+        fun park() {
+            val activity = live?.get() ?: return
+            activity.runOnUiThread {
+                if (!activity.isFinishing && activity.resumed) activity.moveTaskToBack(true)
+            }
         }
 
         fun dismiss() {

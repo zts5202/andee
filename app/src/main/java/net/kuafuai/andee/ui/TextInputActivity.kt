@@ -385,8 +385,10 @@ class TextInputActivity : Activity() {
         super.onResume()
         resumed = true
         // The back catcher is another activity of ours. If it is still resumed
-        // it owns the IME and Chinese input never reaches this field.
-        CardBackActivity.dismiss()
+        // it owns the IME and Chinese input never reaches this field. Park
+        // rather than finish — finishing destroys the window, and the next
+        // unfold then pays a cold start.
+        CardBackActivity.park()
         // Here rather than in onCreate: the window has focus by now, and an IME
         // request from a window that does not is dropped without a word.
         field.requestFocus()
@@ -630,10 +632,16 @@ class TextInputActivity : Activity() {
         field.hint = lctx.getString(if (photos.isEmpty()) R.string.input_hint else R.string.input_hint_photos)
     }
 
+    private var reportedTop = Int.MIN_VALUE
+
     private fun reportTop() {
         if (isFinishing) return
         val at = IntArray(2)
         strip.getLocationOnScreen(at)
+        // Candidate-bar insets repeat the same edge. Each one used to resize
+        // the overlay.
+        if (at[1] == reportedTop) return
+        reportedTop = at[1]
         onTop?.invoke(at[1])
     }
 

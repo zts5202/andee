@@ -46,11 +46,11 @@ class ScreenBodyService : AccessibilityService() {
         // would turn ordinary tablet taps into TalkBack-style exploration.
         serviceInfo = serviceInfo.apply {
             flags = flags and AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE.inv()
-            // So Back reaches us before the focused app. Gesture-back on HyperOS
-            // often still injects KEYCODE_BACK; when it does not, CardBackActivity
-            // is the focused window. Set here so an already-enabled service picks
-            // it up without a toggle. Other keys are not consumed.
-            flags = flags or AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
+            // The manifest asks for key filtering so the grant includes it.
+            // Leave it off until the card is actually expanded: while it is on,
+            // every key — including IME commits — is delivered here on the main
+            // thread before the editor sees it, which is the typing hitch.
+            flags = flags and AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS.inv()
         }
         // The body first, then the hand. `start` is asynchronous, so on a cold
         // device `get()` is still null one line later — the body pulls the
@@ -127,5 +127,19 @@ class ScreenBodyService : AccessibilityService() {
          * wants [BodyCoreService.get] instead.
          */
         fun get(): ScreenBodyService? = instanceRef.get()
+
+        /**
+         * Key filtering only while the expanded card wants Back. Off for the
+         * folded ball and for the whole time a field is up.
+         */
+        fun setKeyFilter(on: Boolean) {
+            val svc = instanceRef.get() ?: return
+            val info = svc.serviceInfo ?: return
+            val flag = AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
+            val has = info.flags and flag != 0
+            if (has == on) return
+            info.flags = if (on) info.flags or flag else info.flags and flag.inv()
+            runCatching { svc.serviceInfo = info }
+        }
     }
 }

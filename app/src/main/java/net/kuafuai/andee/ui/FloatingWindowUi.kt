@@ -922,9 +922,23 @@ class FloatingWindowUi(
                 compact = false
                 syncCover()
                 exitCompact()
-                listeners.onExpandedChanged(true)
+                // Not [Listeners.onExpandedChanged]. That starts the back
+                // catcher in this same turn, and the catcher then fights the
+                // typing activity for the IME.
             }
-            applyTypingClearance(provisionalStripTop())
+            val p = params
+            if (p != null && !compact) {
+                if (typingGeometry == null) {
+                    typingGeometry = intArrayOf(p.x, p.y, p.width, p.height)
+                }
+                val safe = clearanceHeight(provisionalStripTop())
+                // MATCH_PARENT is -1. Never grow a window that is already
+                // clear of the field — growing is a second layout, and it can
+                // cover the EditText the provisional guess was short of.
+                if (p.height < 0 || p.height > safe) p.height = safe
+                inputPill?.visibility = View.INVISIBLE
+                typingTop = provisionalStripTop()
+            }
             applyWindow()
             onReady()
         }
@@ -934,12 +948,8 @@ class FloatingWindowUi(
     fun endTypingSession() {
         ui.post {
             typingSession = false
-            if (typingTop != 0 || typingGeometry != null) {
-                typingTop = 0
-                applyTypingTop()
-            } else {
-                applyWindow()
-            }
+            typingTop = 0
+            if (typingGeometry != null) applyTypingTop() else applyWindow()
             listeners.onExpandedChanged(root != null && !compact)
         }
     }
@@ -950,19 +960,47 @@ class FloatingWindowUi(
 
     fun setTypingTop(topPx: Int) {
         ui.post {
-            if (typingTop == topPx) return@post
-            typingTop = topPx
-            applyTypingTop()
+            // 0 is a keyboard blip, or the keys leaving as the field closes.
+            // Growing the card back over the EditText on that is a layout, and
+            // it covers the field if the IME comes straight back. [endTypingSession]
+            // restores once, when the field is actually gone.
+            if (!typingSession || topPx <= 0) return@post
+            shrinkForField(topPx)
         }
+    }
+
+    /**
+     * Shorten the overlay so it ends above [stripTopOnScreen].
+     *
+     * Only shortens, and only when the current height would still cover the
+     * field. A candidate row that jitters a few pixels used to call
+     * [applyWindow] — frost, repaint, two `updateViewLayout`s — on every inset.
+     * That is the typing hitch. A gap above the field is harmless; covering
+     * the field is not.
+     */
+    private fun shrinkForField(stripTopOnScreen: Int) {
+        val v = root ?: return
+        val p = params ?: return
+        if (compact) return
+        val safe = clearanceHeight(stripTopOnScreen)
+        // 8 dp is the same margin already reserved above the field. Inside it,
+        // a candidate-bar jitter must not relayout the card. Past it, shrink.
+        if (p.height > 0 && p.height <= safe + dp(8)) {
+            typingTop = stripTopOnScreen
+            return
+        }
+        if (typingGeometry == null) {
+            typingGeometry = intArrayOf(p.x, p.y, p.width, p.height)
+        }
+        typingTop = stripTopOnScreen
+        p.height = safe
+        inputPill?.visibility = View.INVISIBLE
+        runCatching { wm.updateViewLayout(v, p) }
     }
 
     private fun applyTypingTop() {
         if (root == null || params == null) return
-        if (typingTop > 0) {
-            // Folded, the window is a corner square that is nowhere near the
-            // field; there is nothing to step aside from.
-            if (!compact) applyTypingClearance(typingTop)
-        } else if (compact) {
+        if (compact) {
             // A fold in between owns the geometry now; just forget the snapshot.
             typingGeometry = null
         } else {
@@ -983,19 +1021,9 @@ class FloatingWindowUi(
      * minimum that crosses the strip — a short card is usable, a covered field
      * is not.
      */
-    private fun applyTypingClearance(stripTopOnScreen: Int) {
-        val v = root ?: return
-        val p = params ?: return
-        if (compact) return
-        if (typingGeometry == null) {
-            typingGeometry = intArrayOf(p.x, p.y, p.width, p.height)
-        }
+    private fun clearanceHeight(stripTopOnScreen: Int): Int {
         val margin = dp(8)
-        val safe = (stripTopOnScreen - frameTopOnScreen() - margin).coerceAtLeast(dp(48))
-        p.height = safe
-        // The real field is up now, right under this edge: the pill would be a second, dead copy of it.
-        inputPill?.visibility = View.INVISIBLE
-        runCatching { wm.updateViewLayout(v, p) }
+        return (stripTopOnScreen - frameTopOnScreen() - margin).coerceAtLeast(dp(48))
     }
 
     /** Where a keyboard, its candidate row and the field usually sit, before the first inset. */
@@ -1012,18 +1040,23 @@ class FloatingWindowUi(
         return loc[1].coerceAtLeast(0)
     }
 
-    /** Put back the geometry [setTypingBand] borrowed. */
+    /**
+     * Put back the geometry a typing session borrowed.
+     *
+     * Params only. The caller pushes — [applyWindow] after a session, or
+     * [setCompact] after a fold. Pushing here as well laid the window out
+     * twice, and a fold would flash the full card for a frame on the way
+     * down to the ball.
+     */
     private fun restoreTypingGeometry() {
         inputPill?.visibility = View.VISIBLE
         val g = typingGeometry ?: return
         typingGeometry = null
-        val v = root ?: return
         val p = params ?: return
         p.x = g[0]
         p.y = g[1]
         p.width = g[2]
         p.height = g[3]
-        runCatching { wm.updateViewLayout(v, p) }
     }
 
     fun hide(): Boolean {
@@ -2374,7 +2407,7 @@ class FloatingWindowUi(
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
         // Untouchable while a typing field is up. On HyperOS that flag does
-        // not by itself pass touches through the rectangle — [applyTypingClearance]
+        // not by itself pass touches through the rectangle — [shrinkForField]
         // is what actually uncovers the EditText — but a late inset must not
         // put this window over the top row of the field either.
         val yieldToField = !compact && (typingSession || typingTop > 0)
