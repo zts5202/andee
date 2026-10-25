@@ -4,7 +4,7 @@ Notable changes to Andee. The format follows [Keep a Changelog](https://keepacha
 
 ## Versioning policy
 
-- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`17` / `"0.5.8"`**.
+- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`18` / `"0.5.9"`**.
 - Releases are tagged `vMAJOR.MINOR.PATCH`, `versionName` mirrors the tag without the leading `v`,
   and `versionCode` increases by one per release. `versionCode` must increase **monotonically** or
   Android refuses the upgrade; the same number must never be reused for two different builds.
@@ -27,6 +27,14 @@ anything not built at a tag, identify it by the short commit hash it was built f
 hash into `versionName` at build time would close this hole; it is not implemented yet.)
 
 ## [Unreleased]
+
+## [0.5.9] - 2026-10-25
+
+The local brain can use Xiaomi MiMo as well as DeepSeek. DeepSeek's settings, key and request stay as they were. The folded ball, Back, typing and step-aside are unchanged.
+
+### Added
+
+- **MiMo V2.6 Flash, beside DeepSeek.** On the local-brain tab, 模型服务 switches between them. DeepSeek keeps its key, model, URL, thinking switch and effort. MiMo is fixed to `mimo-v2.6-flash` at `https://api.xiaomimimo.com/v1`, stores its key as `mimo_api_key` (not in the repo), and has its own 关思考 / 开思考 switch. A new MiMo config sends `"thinking": {"type": "disabled"}`. MiMo's own default is thinking on, so the field is written either way; turning the switch on sends `enabled` and does not send `reasoning_effort`. With thinking on, a tool-call turn is echoed with `reasoning_content`, which that API requires. The request log (tag `Brain`) is `llm request model=… thinking.type=… provider=…`.
 
 ## [0.5.8] - 2026-10-25
 

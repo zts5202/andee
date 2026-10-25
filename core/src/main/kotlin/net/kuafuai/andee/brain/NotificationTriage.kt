@@ -57,6 +57,7 @@ class NotificationTriage(
         // See the class KDoc: a classification does not think.
         thinking = false,
         reasoningEffort = cfg.reasoningEffort,
+        provider = cfg.provider,
     )
 
     enum class Action {

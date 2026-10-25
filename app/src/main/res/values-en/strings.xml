@@ -87,6 +87,14 @@
     <string name="settings_llm_model">Model</string>
     <string name="settings_llm_base_url">Base URL</string>
     <string name="settings_llm_thinking">Deep thinking</string>
+    <string name="settings_llm_provider">Model service</string>
+    <string name="settings_llm_provider_deepseek">DeepSeek</string>
+    <string name="settings_llm_provider_mimo">MiMo V2.6 Flash</string>
+    <string name="settings_mimo_api_key">MiMo API key</string>
+    <string name="settings_mimo_api_key_hint">Key from the Xiaomi MiMo console. It stays on this device.</string>
+    <string name="settings_mimo_note">Fixed to mimo-v2.6-flash at https://api.xiaomimimo.com/v1. Thinking is off unless you turn it on; MiMo\'s own default is on, so the request sends disabled.</string>
+    <string name="settings_llm_thinking_off">Thinking off</string>
+    <string name="settings_llm_thinking_on">Thinking on</string>
     <string name="common_on">On</string>
     <string name="common_off">Off</string>
     <string name="settings_llm_effort">Reasoning effort</string>
@@ -266,7 +274,7 @@
     <string name="settings_scenes_browse">Manage scenes</string>
 
     <!-- The factory-reset confirmation list; see config/FactoryReset.kt. -->
-    <string name="factory_reset_target_keys">the Volcano and DeepSeek keys, and every speech and brain setting</string>
+    <string name="factory_reset_target_keys">the Volcano, DeepSeek and MiMo keys, and every speech and brain setting</string>
     <string name="factory_reset_target_notebook">the notebook: what it remembers and what it promised</string>
     <string name="factory_reset_target_vault">the accounts, passwords and bank cards kept in the vault</string>
     <string name="factory_reset_target_wake">the wake-word recordings (they will have to be recorded again)</string>
@@ -477,6 +485,7 @@
 
     <!-- LocalBrain — display half only; see the comment on the Chinese side. -->
     <string name="brain_no_key">The on-device brain has no API key yet. Long-press the ball to bring the card back, tap ⚙ in the control bar, and put the key in Backend → On-device → “DeepSeek Key”.</string>
+    <string name="brain_no_key_mimo">The on-device brain has no MiMo API key yet. Long-press the ball, tap ⚙, choose MiMo under Backend → On-device, and put the key in “MiMo API key”.</string>
     <string name="brain_error">Something broke on my side: %1$s</string>
     <string name="brain_error_402">The backend answered 402, which most likely means the account is out of balance. Open Settings → Backend to see which provider you are using, then top up on that provider\'s website and try again.</string>
     <string name="brain_error_402_codeflying">The backend answered 402, which most likely means your CodeFlying balance has run out. Open CodeFlying.app in a computer browser, sign in, top up, and try again.</string>
@@ -547,6 +556,7 @@
     <string name="check_detail_brain_on">Configured.</string>
     <string name="check_detail_brain_hub_missing">Not set. The brain is set to the cloud, so the address of your own hub goes in ⚙ → Backend → Cloud → “Hub URL”. The Cloud tab is hidden by default — if you cannot see it, turn on Advanced → “Show cloud option” first. Without it there is nowhere to send what you say: no answers, and nothing on screen moves. To have this device think for itself, pick “On-device” in the same row.</string>
     <string name="check_detail_brain_key_missing">Not set. The brain is set to run on this device, so open a DeepSeek account of your own and put the key in ⚙ → Backend → On-device → “DeepSeek Key”. Without it, what you say arrives and nothing can be answered or acted on.</string>
+    <string name="check_detail_brain_key_missing_mimo">Not set. This device is using Xiaomi MiMo, so put the key in ⚙ → Backend → On-device → MiMo → “MiMo API key”. Without it, what you say arrives and nothing can be answered or acted on.</string>
     <string name="check_detail_model_cloud">Cloud assistant — the model is not on this device.</string>
     <string name="check_detail_model_no_key">No key yet. Fill one in and this becomes testable.</string>
     <string name="check_detail_checking">Checking…</string>

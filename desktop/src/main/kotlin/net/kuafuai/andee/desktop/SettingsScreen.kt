@@ -91,18 +91,50 @@ fun SettingsScreen(
             }
             "codeflying" -> Note(st("settings_brain_codeflying_unconfigured"))
             else -> {
-                GlassField(st("settings_llm_api_key"), v["llm_api_key"].orEmpty(), { v["llm_api_key"] = it }, secret = true, hint = "sk-…")
-                GlassField(st("settings_llm_model"), v["llm_model"].orEmpty(), { v["llm_model"] = it }, hint = llmModelHint)
-                GlassField(st("settings_llm_base_url"), v["llm_base_url"].orEmpty(), { v["llm_base_url"] = it }, hint = llmUrlHint)
-                RowLabel(st("settings_llm_thinking"))
-                val thinking = v["llm_thinking"].orEmpty().ifEmpty { "enabled" }
-                SegmentedPicker(listOf("enabled" to st("common_on"), "disabled" to st("common_off")), thinking) { v["llm_thinking"] = it }
-                if (thinking != "disabled") {
-                    RowLabel(st("settings_llm_effort"))
+                val llm = BrainConfig.normalizeProvider(v["llm_provider"])
+                RowLabel(t("模型服务", "Model service"))
+                SegmentedPicker(
+                    listOf(
+                        "deepseek" to "DeepSeek",
+                        "mimo" to "MiMo V2.6 Flash",
+                    ),
+                    llm,
+                ) { v["llm_provider"] = it }
+                if (llm == "mimo") {
+                    GlassField(
+                        t("MiMo API Key", "MiMo API key"),
+                        v["mimo_api_key"].orEmpty(),
+                        { v["mimo_api_key"] = it },
+                        secret = true,
+                        hint = t("小米 MiMo 控制台的 Key", "Key from the Xiaomi MiMo console"),
+                    )
+                    RowLabel(st("settings_llm_thinking"))
+                    val mt = v["mimo_thinking"].orEmpty().ifEmpty { "disabled" }
                     SegmentedPicker(
-                        listOf("high" to st("common_high"), "medium" to st("common_medium"), "low" to st("common_low")),
-                        v["llm_reasoning_effort"].orEmpty().ifEmpty { "high" },
-                    ) { v["llm_reasoning_effort"] = it }
+                        listOf(
+                            "disabled" to t("关思考", "Thinking off"),
+                            "enabled" to t("开思考", "Thinking on"),
+                        ),
+                        mt,
+                    ) { v["mimo_thinking"] = it }
+                    Note(t(
+                        "固定使用 mimo-v2.6-flash，接口 https://api.xiaomimimo.com/v1。思考默认关闭。",
+                        "Fixed to mimo-v2.6-flash at https://api.xiaomimimo.com/v1. Thinking is off unless you turn it on.",
+                    ))
+                } else {
+                    GlassField(st("settings_llm_api_key"), v["llm_api_key"].orEmpty(), { v["llm_api_key"] = it }, secret = true, hint = "sk-…")
+                    GlassField(st("settings_llm_model"), v["llm_model"].orEmpty(), { v["llm_model"] = it }, hint = llmModelHint)
+                    GlassField(st("settings_llm_base_url"), v["llm_base_url"].orEmpty(), { v["llm_base_url"] = it }, hint = llmUrlHint)
+                    RowLabel(st("settings_llm_thinking"))
+                    val thinking = v["llm_thinking"].orEmpty().ifEmpty { "enabled" }
+                    SegmentedPicker(listOf("enabled" to st("common_on"), "disabled" to st("common_off")), thinking) { v["llm_thinking"] = it }
+                    if (thinking != "disabled") {
+                        RowLabel(st("settings_llm_effort"))
+                        SegmentedPicker(
+                            listOf("high" to st("common_high"), "medium" to st("common_medium"), "low" to st("common_low")),
+                            v["llm_reasoning_effort"].orEmpty().ifEmpty { "high" },
+                        ) { v["llm_reasoning_effort"] = it }
+                    }
                 }
                 Note(st("settings_brain_local_note"))
             }

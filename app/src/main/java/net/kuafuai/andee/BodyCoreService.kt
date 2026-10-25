@@ -2853,8 +2853,10 @@ class BodyCoreService : Service() {
         }
         android.util.Log.i(
             "Body",
-            "brain=local — skipping outbound client (model=${bc.model} @ ${bc.baseUrl}, " +
-                "thinking=${bc.thinking}/${bc.reasoningEffort}, key=${if (bc.apiKey.isEmpty()) "MISSING" else "set"})",
+            "brain=local provider=${bc.provider} model=${bc.model} @ ${bc.baseUrl}, " +
+                "thinking.type=${if (bc.thinking) "enabled" else "disabled"}" +
+                (if (bc.provider == net.kuafuai.andee.config.BrainConfig.PROVIDER_MIMO) "" else "/${bc.reasoningEffort}") +
+                ", key=${if (bc.apiKey.isEmpty()) "MISSING" else "set"}",
         )
         // Same silence, same explanation as the hub branch above: a local brain
         // with no key answers nothing at all, and "nothing at all" is the one

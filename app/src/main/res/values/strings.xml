@@ -64,6 +64,14 @@
     <string name="settings_llm_model">模型</string>
     <string name="settings_llm_base_url">接口地址</string>
     <string name="settings_llm_thinking">深度思考</string>
+    <string name="settings_llm_provider">模型服务</string>
+    <string name="settings_llm_provider_deepseek">DeepSeek</string>
+    <string name="settings_llm_provider_mimo">MiMo V2.6 Flash</string>
+    <string name="settings_mimo_api_key">MiMo API Key</string>
+    <string name="settings_mimo_api_key_hint">小米 MiMo 控制台的 Key，只存在这台设备上</string>
+    <string name="settings_mimo_note">固定使用 mimo-v2.6-flash，接口 https://api.xiaomimimo.com/v1。思考默认关闭；官方默认是开，这里会在请求里写上 disabled。</string>
+    <string name="settings_llm_thinking_off">关思考</string>
+    <string name="settings_llm_thinking_on">开思考</string>
     <string name="common_on">开</string>
     <string name="common_off">关</string>
     <string name="settings_llm_effort">思考强度</string>
@@ -250,7 +258,7 @@
 
     <!-- The 恢复出厂设置 confirmation list: one line per thing wiped.
          Kept beside config/FactoryReset.kt, which walks them in this order. -->
-    <string name="factory_reset_target_keys">火山 key、DeepSeek key，以及所有语音与大脑的设置</string>
+    <string name="factory_reset_target_keys">火山 key、DeepSeek key、MiMo key，以及所有语音与大脑的设置</string>
     <string name="factory_reset_target_notebook">小本本：记住的事、答应过还没办的事</string>
     <string name="factory_reset_target_vault">保险箱里存的账号密码和银行卡</string>
     <string name="factory_reset_target_wake">唤醒词的录音（要重新录一遍）</string>
@@ -554,6 +562,7 @@
         stays as it is in both languages.
     -->
     <string name="brain_no_key">本地大脑还没配 API key。长按小球把卡片展开，点控制条上的 ⚙ 打开设置，把 Key 填进「后端」→「本机」→「DeepSeek Key」。</string>
+    <string name="brain_no_key_mimo">本地大脑还没配 MiMo API Key。长按小球把卡片展开，点 ⚙，在「后端」→「本机」里选 MiMo，把 Key 填进「MiMo API Key」。</string>
     <string name="brain_error">我这边出错了：%1$s</string>
     <string name="brain_error_402">后端服务返回了 402，多半是账户余额不足了。到「设置」→「后端」看看当前用的是哪家服务商，打开它的官网充值后再试。</string>
     <string name="brain_error_402_codeflying">后端服务返回了 402，多半是 CodeFlying 账户余额不足了。用电脑浏览器打开 CodeFlying.net 登录后充值，再试一次。</string>
@@ -633,6 +642,7 @@
     <string name="check_detail_brain_on">已配置。</string>
     <string name="check_detail_brain_hub_missing">还没填。现在用的是云端大脑，得把你自己搭的 Hub 地址填进 ⚙ →「后端」→「云端」→「Hub 地址」。「云端」默认藏着，看不到就先去「高级」→「显示云端选项」把它打开。没有它，你说的话没地方送，问了不会有回答，屏幕也不会动。想让这台设备自己想，就在同一排把大脑切成「本机」。</string>
     <string name="check_detail_brain_key_missing">还没填。现在用的是本机大脑，得你自己去 DeepSeek 开一个，把 Key 填进 ⚙ →「后端」→「本机」→「DeepSeek Key」。没有它，你说的话我收得到，却答不出、也动不了手。</string>
+    <string name="check_detail_brain_key_missing_mimo">还没填。现在用的是小米 MiMo，把 Key 填进 ⚙ →「后端」→「本机」→ MiMo →「MiMo API Key」。没有它，你说的话我收得到，却答不出、也动不了手。</string>
     <string name="check_detail_model_cloud">云端大脑，模型不在这台设备上。</string>
     <string name="check_detail_model_no_key">还没填 Key，填了才测得了。</string>
     <string name="check_detail_checking">检查中…</string>
