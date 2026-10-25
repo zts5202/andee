@@ -47,9 +47,11 @@ class ScreenBodyService : AccessibilityService() {
         serviceInfo = serviceInfo.apply {
             flags = flags and AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE.inv()
             // The manifest asks for key filtering so the grant includes it.
-            // Leave it off until the card is actually expanded: while it is on,
-            // every key — including IME commits — is delivered here on the main
-            // thread before the editor sees it, which is the typing hitch.
+            // Leave it off for good. Turning it on while the card is expanded
+            // stops HyperOS from generating gesture Back and Home at all, and
+            // while it is on every IME commit is also delivered here before
+            // the editor. A finger swipe is handled on the card; a real
+            // KEYCODE_BACK is handled by CardBackActivity.
             flags = flags and AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS.inv()
         }
         // The body first, then the hand. `start` is asynchronous, so on a cold
@@ -79,10 +81,10 @@ class ScreenBodyService : AccessibilityService() {
     /**
      * System Back while the card is expanded folds it, the same as ✕.
      *
-     * This runs before the focused app sees the key, which is the whole point:
-     * the overlay never becomes that app on HyperOS. Consumed only for Back,
-     * and only while [BodyCoreService.wantsBackToFold] is true — a folded ball,
-     * a typing field, or settings must still get the key.
+     * Only reached if something turns key filtering on. The service does not:
+     * on HyperOS that flag stops gesture Back and Home from being generated.
+     * Kept so a stale flag still folds instead of eating the key. Consumed
+     * only for Back, and only while [BodyCoreService.wantsBackToFold] is true.
      */
     override fun onKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode != KeyEvent.KEYCODE_BACK) return false
@@ -129,8 +131,10 @@ class ScreenBodyService : AccessibilityService() {
         fun get(): ScreenBodyService? = instanceRef.get()
 
         /**
-         * Key filtering only while the expanded card wants Back. Off for the
-         * folded ball and for the whole time a field is up.
+         * Key filtering stays off. [BodyCoreService] calls this with false to
+         * clear a flag the manifest requested. Do not pass true: on HyperOS
+         * the filter stops gesture navigation, and it also puts every IME
+         * commit on this main thread before the editor.
          */
         fun setKeyFilter(on: Boolean) {
             val svc = instanceRef.get() ?: return

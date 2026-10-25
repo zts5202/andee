@@ -382,6 +382,17 @@ class BodyCoreService : Service() {
                 syncBackCatcher()
             }
 
+            override fun wantsNavGesture(): Boolean = wantsBackToFold()
+
+            override fun onNavigateBack() {
+                android.util.Log.i(TAG, "nav: edge back → fold")
+                foldCardFromBack()
+            }
+
+            override fun onNavigateHome() {
+                goHomeFromCard()
+            }
+
             /**
              * Re-show a page from the scrollback, or read a message fullscreen.
              *
@@ -620,6 +631,12 @@ class BodyCoreService : Service() {
         // System Back while the card is up. The overlay does not receive it on
         // HyperOS; the accessibility key filter and CardBackActivity both land here.
         net.kuafuai.andee.ui.CardBackActivity.onFold = { foldCardFromBack() }
+        // Home pauses the catcher. The window-state event can land before or
+        // after onPause; both paths fold only once the catcher has actually
+        // been shown and then left, so opening the card on the launcher does
+        // not immediately fold it.
+        net.kuafuai.andee.ui.CardBackActivity.onPaused = { ui.post(catcherLeftHome) }
+        net.kuafuai.andee.ui.OwnCard.onChanged = { syncBackCatcher() }
         asr = AsrController(
             this, audio, window,
             onTranscript = { text, userInitiated ->
@@ -1259,9 +1276,32 @@ class BodyCoreService : Service() {
 
     private fun syncBackCatcherNow() {
         val want = wantsBackToFold()
-        ScreenBodyService.setKeyFilter(want)
+        // Off, including while the card is expanded. Turning the filter on
+        // there is what 0.5.7–0.5.9 did, and on HyperOS a service holding
+        // FLAG_REQUEST_FILTER_KEY_EVENTS stops gesture Back and Home from
+        // being generated at all — onKeyEvent then has nothing to fold.
+        // The catcher still receives a real KEYCODE_BACK (3-button, adb).
+        ScreenBodyService.setKeyFilter(false)
         if (want) net.kuafuai.andee.ui.CardBackActivity.ensure(this)
         else net.kuafuai.andee.ui.CardBackActivity.park()
+    }
+
+    /**
+     * Finger swipe up on the card. The system never saw it — the overlay is
+     * above the gesture zone — so fold, then ask accessibility for Home.
+     * A Home the system did see (the strip we left clear, or `adb input
+     * keyevent 3`) comes through [noteForegroundPackage] instead and must
+     * not send Home a second time.
+     */
+    private fun goHomeFromCard() {
+        android.util.Log.i(TAG, "nav: upward swipe → fold, then home")
+        if (!foldCardFromBack()) return
+        val svc = ScreenBodyService.get()
+        if (svc == null) {
+            android.util.Log.w(TAG, "nav: no accessibility service, home key not sent")
+            return
+        }
+        svc.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
     }
 
     /**
@@ -1713,16 +1753,60 @@ class BodyCoreService : Service() {
      */
     fun noteForegroundPackage(pkg: String) {
         maybeAutoEnterScene(pkg)
-        // The card is up but some other app is the focused window again
-        // (HyperOS drops a translucent or just-started catcher). Bring the
-        // catcher back so the next gesture still folds. Our own package is the
-        // catcher or the typing field — leaving it alone is what keeps the
-        // keyboard from being paused.
-        if (pkg != packageName && wantsBackToFold()) {
-            // Posted and coalesced. Calling ensure() from the event itself
-            // started the catcher again on every window change.
-            syncBackCatcher()
+        if (!wantsBackToFold()) return
+        // Home must fold and must not start the catcher back over the launcher.
+        // That reorder is why an upward swipe that did reach the system still
+        // looked like nothing: our task was pulled forward and the card was
+        // still covering the display. Fold only after the catcher has been
+        // shown and then left — the launcher is also what's in front in the
+        // moment before the catcher starts, and folding there would close a
+        // card the user just opened. System UI (shade, recents) is not a
+        // destination. Another app may have dropped the catcher, so the back
+        // key still has somewhere to land.
+        when (
+            net.kuafuai.andee.ui.ForegroundNav.action(
+                pkg,
+                packageName,
+                isHomePackage(pkg),
+                net.kuafuai.andee.ui.ForegroundNav.isSystemUi(pkg),
+            )
+        ) {
+            net.kuafuai.andee.ui.ForegroundNav.Action.IGNORE -> Unit
+            net.kuafuai.andee.ui.ForegroundNav.Action.FOLD -> {
+                if (net.kuafuai.andee.ui.CardBackActivity.catcherHasLeft()) {
+                    android.util.Log.i(TAG, "nav: $pkg is home → fold")
+                    foldCardFromBack()
+                }
+            }
+            net.kuafuai.andee.ui.ForegroundNav.Action.CATCH -> syncBackCatcher()
         }
+    }
+
+    /** Catcher went to the background. If the launcher is what replaced it, fold. */
+    private val catcherLeftHome = Runnable {
+        if (!wantsBackToFold()) return@Runnable
+        if (!net.kuafuai.andee.ui.CardBackActivity.catcherHasLeft()) return@Runnable
+        val pkg = net.kuafuai.andee.device.DeviceState.foregroundPkg ?: return@Runnable
+        if (!isHomePackage(pkg)) return@Runnable
+        android.util.Log.i(TAG, "nav: catcher left, $pkg is home → fold")
+        foldCardFromBack()
+    }
+
+    private var homePackages: Set<String>? = null
+
+    /** Default launcher and every other HOME activity, so a third-party desktop still folds the card. */
+    private fun isHomePackage(pkg: String): Boolean {
+        if (pkg.isEmpty()) return false
+        homePackages?.let { return pkg in it }
+        val intent = android.content.Intent(android.content.Intent.ACTION_MAIN)
+            .addCategory(android.content.Intent.CATEGORY_HOME)
+        val found = packageManager.queryIntentActivities(intent, 0)
+            .mapNotNull { it.activityInfo?.packageName }
+            .toMutableSet()
+        packageManager.resolveActivity(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
+            ?.activityInfo?.packageName?.let { found.add(it) }
+        homePackages = found
+        return pkg in found
     }
 
     /** An accessibility event, still ours to interpret. See [ScreenController.noteEvent]. */
@@ -1767,6 +1851,8 @@ class BodyCoreService : Service() {
         scenesUi = null
         net.kuafuai.andee.config.VoiceConfig.onSceneChanged = null
         net.kuafuai.andee.ui.CardBackActivity.onFold = null
+        net.kuafuai.andee.ui.CardBackActivity.onPaused = null
+        net.kuafuai.andee.ui.OwnCard.onChanged = null
         net.kuafuai.andee.ui.CardBackActivity.dismiss()
         // Before the windows go: this one has to put the keyboard back, and a
         // service that dies mid-typing would otherwise leave the tablet with

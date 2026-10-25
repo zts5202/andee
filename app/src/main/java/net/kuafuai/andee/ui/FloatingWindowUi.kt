@@ -211,9 +211,22 @@ class FloatingWindowUi(
          *
          * Back is not delivered to this overlay on HyperOS (focus stays on the
          * app behind it), so the service uses this to hold or drop the activity
-         * that actually receives the gesture. Default no-op.
+         * that receives a real Back *key*. A finger swipe is [onNavigateBack]
+         * and [onNavigateHome]. Default no-op.
          */
         fun onExpandedChanged(expanded: Boolean) {}
+
+        /**
+         * False while the folded ball, the typing field, or our own settings
+         * card should keep Back and Home. Default true.
+         */
+        fun wantsNavGesture(): Boolean = true
+
+        /** A finger back-swipe on the card. Same fold as ✕. */
+        fun onNavigateBack() {}
+
+        /** A finger swipe up from the bottom of the card. Fold, then go home. */
+        fun onNavigateHome() {}
 
         /**
          * Two taps on the ball — the user wants to type instead of talk.
@@ -544,6 +557,17 @@ class FloatingWindowUi(
     /** Hops left in the current burst before the next long rest. */
     private var strollLeft = 0
 
+    /** One log line per process for the strip the expanded card leaves at the bottom. */
+    private var navClearanceLogged = false
+
+    /**
+     * Extra pixels taken off the bottom after the laid-out frame was measured
+     * still covering the gesture strip. Folded into the next frame so a later
+     * [applyWindow] does not grow the window back over it.
+     */
+    private var navTrimExtra = 0
+    private var navTrimPosted = false
+
     private var slide: ValueAnimator? = null
 
     fun isShown(): Boolean = root != null
@@ -587,7 +611,12 @@ class FloatingWindowUi(
             // FLAG_LAYOUT_IN_SCREEN alone is not enough: since API 30 the window
             // also fits the system-bar insets by default, so on the Honor phone a
             // MATCH_PARENT card still started below the status bar and stopped
-            // above the navigation bar. Zero lets the card cover the display.
+            // above the navigation bar. Zero lets the top of the card run under
+            // the status bar. The bottom is a different question: this window
+            // type is drawn *above* the navigation bar, so a full-height window
+            // eats Home and the back button. [applyExpandedFrame] stops the
+            // height above that strip. Do not put the zero back and also grow
+            // the height to the display bottom.
             fitInsetsTypes = 0
             layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
@@ -2437,6 +2466,95 @@ class FloatingWindowUi(
         // the battery icon sit on top of `◈` and `✕`, and those are the two
         // controls the user cannot do without.
         insetTopBar()
+        // After the flags, before the layout. Folded and typing keep the
+        // rectangle their own code just set; the expanded card must not.
+        applyExpandedFrame()
+        runCatching { wm.updateViewLayout(v, p) }
+    }
+
+    /**
+     * Stop the expanded card above the system gesture / navigation strip.
+     *
+     * `TYPE_APPLICATION_OVERLAY` (2038) is above the navigation bar (2019).
+     * `MATCH_PARENT` plus [WindowManager.LayoutParams.fitInsetsTypes] `0`
+     * therefore receives every touch in the home-gesture zone and on the
+     * 3-button bar, and HyperOS never starts the gesture. `FLAG_NOT_TOUCHABLE`
+     * does not give those pixels back on this ROM — the window has to end.
+     *
+     * Sides stay covered. An edge swipe is classified by [NavGesture] and folds
+     * the card; handing it to the system would Back the app behind the overlay
+     * and the card would still be sitting there. Main thread only.
+     */
+    private fun applyExpandedFrame() {
+        if (compact || typingSession || typingTop > 0) return
+        val p = params ?: return
+        val b = wm.currentWindowMetrics.bounds
+        val bottom = systemNavClearancePx()
+        val w = b.width()
+        val h = (b.height() - bottom - navTrimExtra).coerceAtLeast(dp(200))
+        val changed = p.x != 0 || p.y != 0 || p.width != w || p.height != h
+        if (changed) {
+            p.gravity = Gravity.TOP or Gravity.START
+            p.x = 0
+            p.y = 0
+            p.width = w
+            p.height = h
+            if (!navClearanceLogged) {
+                navClearanceLogged = true
+                android.util.Log.i(
+                    "Body",
+                    "nav: expanded window ${w}x$h leaves ${bottom}px for system home/back",
+                )
+            }
+        }
+        // A MATCH_PARENT frame on some ROMs starts at the status bar, so a
+        // height of screen-minus-clearance still covers the gesture strip.
+        // One check after layout, and only a real shortfall changes anything.
+        if (!navTrimPosted) {
+            navTrimPosted = true
+            ui.post {
+                navTrimPosted = false
+                trimIfCoveringNav()
+            }
+        }
+    }
+
+    private fun systemNavClearancePx(): Int {
+        val insets = wm.currentWindowMetrics.windowInsets
+        val gesture = insets.getInsetsIgnoringVisibility(WindowInsets.Type.systemGestures()).bottom
+        val nav = insets.getInsetsIgnoringVisibility(WindowInsets.Type.navigationBars()).bottom
+        // Floor, not a guess about one phone. A reported 0 — common for an
+        // overlay that opted out of fitInsets — would leave the strip covered,
+        // which is the whole bug. 48dp clears a 3-button bar and the K90's
+        // home gesture (144 px at density 480).
+        return maxOf(gesture, nav, dp(48))
+    }
+
+    private fun backEdgePx(): Int {
+        val insets = wm.currentWindowMetrics.windowInsets
+            .getInsetsIgnoringVisibility(WindowInsets.Type.systemGestures())
+        return maxOf(insets.left, insets.right, dp(32)).coerceAtMost(dp(48))
+    }
+
+    /** Main thread. Shorten once if the laid-out frame still reaches the gesture strip. */
+    private fun trimIfCoveringNav() {
+        if (compact || typingSession || typingTop > 0) return
+        val v = root ?: return
+        val p = params ?: return
+        if (!v.isLaidOut || p.height <= 0) return
+        val loc = IntArray(2)
+        v.getLocationOnScreen(loc)
+        val screenH = wm.currentWindowMetrics.bounds.height()
+        val gap = screenH - (loc[1] + v.height)
+        val want = systemNavClearancePx()
+        if (gap >= want - dp(4)) return
+        val extra = want - gap
+        // A nonsense reading (window not actually the card yet) must not
+        // collapse the card. A third of the screen is already past any bar.
+        if (extra <= 0 || extra > screenH / 3 || navTrimExtra + extra > screenH / 3) return
+        navTrimExtra += extra
+        p.height = (p.height - extra).coerceAtLeast(dp(200))
+        android.util.Log.i("Body", "nav: frame still covered the gesture strip (gap ${gap}px), height → ${p.height}")
         runCatching { wm.updateViewLayout(v, p) }
     }
 
@@ -3041,6 +3159,66 @@ class FloatingWindowUi(
          * never drags the window either — see the move branch.
          */
         private var swiping = false
+
+        /** Finger down in the back edge or the home band. Ignores a child's disallow so the swipe can still be read. */
+        private var navFromBand = false
+        private var navDownX = 0f
+        private var navDownY = 0f
+        private var navKind: NavGesture.Kind? = null
+
+        private fun navAllowed(): Boolean =
+            !compact && !typingSession && typingTop == 0 && !away && listeners.wantsNavGesture()
+
+        private fun inNavBand(x: Float, y: Float): Boolean {
+            val edge = backEdgePx()
+            val band = dp(36)
+            return x <= edge || x >= width - edge || y >= height - band
+        }
+
+        override fun requestDisallowInterceptTouchEvent(disallowIntercept: Boolean) {
+            // A scroll that starts on the edge calls this after a few pixels.
+            // Honouring it is how an edge-back never reaches the threshold.
+            if (navFromBand) return
+            super.requestDisallowInterceptTouchEvent(disallowIntercept)
+        }
+
+        override fun onInterceptTouchEvent(e: MotionEvent): Boolean {
+            if (!navAllowed()) {
+                navFromBand = false
+                navKind = null
+                return false
+            }
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    navDownX = e.x
+                    navDownY = e.y
+                    navKind = null
+                    navFromBand = inNavBand(e.x, e.y)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (navFromBand && navKind == null) {
+                        val kind = NavGesture.classify(
+                            navDownX, navDownY, e.x, e.y, width, height,
+                            backEdgePx(), dp(36), dp(64),
+                        )
+                        if (kind != null) {
+                            navKind = kind
+                            return true
+                        }
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> navFromBand = false
+            }
+            return false
+        }
+
+        private fun dispatchNav(kind: NavGesture.Kind) {
+            when (kind) {
+                NavGesture.Kind.BACK -> listeners.onNavigateBack()
+                NavGesture.Kind.HOME -> listeners.onNavigateHome()
+            }
+        }
+
         private val longPressRunnable = Runnable {
             if (tracking && !moved) {
                 longPressed = true
@@ -3070,6 +3248,15 @@ class FloatingWindowUi(
         }
 
         override fun onTouchEvent(e: MotionEvent): Boolean {
+            val pending = navKind
+            if (pending != null) {
+                if (e.actionMasked == MotionEvent.ACTION_UP) dispatchNav(pending)
+                if (e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) {
+                    navKind = null
+                    navFromBand = false
+                }
+                return true
+            }
             val p = params ?: return false
             val ballH = ballAreaView?.height ?: return false
             val areaTop = ballAreaView?.top ?: 0

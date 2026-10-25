@@ -59,6 +59,7 @@ class CardBackActivity : Activity() {
     override fun onPause() {
         resumed = false
         super.onPause()
+        onPaused?.invoke()
     }
 
     @Deprecated("API 33+ delivers the gesture to the callback; this is the key below that")
@@ -69,6 +70,7 @@ class CardBackActivity : Activity() {
 
     private fun fold() {
         if (isFinishing) return
+        Log.i(TAG, "nav: KEYCODE_BACK → fold")
         // Ask the service to fold, then step behind without destroying the
         // window. finish() here is a cold start on the next unfold, and that
         // task switch is what made the card hitch. On a real fold the overlay
@@ -93,6 +95,16 @@ class CardBackActivity : Activity() {
          */
         @Volatile
         var onFold: (() -> Boolean)? = null
+
+        /** Catcher lost the foreground. The service checks whether Home did that. */
+        @Volatile
+        var onPaused: (() -> Unit)? = null
+
+        /** Shown, then left. False while the first start is still in flight. */
+        fun catcherHasLeft(): Boolean {
+            val cur = live?.get() ?: return false
+            return cur.wasShown && !cur.resumed && !cur.isFinishing
+        }
 
         private var live: WeakReference<CardBackActivity>? = null
         private var ensureAt = 0L

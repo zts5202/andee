@@ -97,12 +97,22 @@ object OwnCard {
 
     val showing: Boolean get() = depth.get() > 0
 
+    /**
+     * Settings, the vault and the other focusable cards. The back catcher has
+     * to step aside while one of them is up, or a Back key folds the chat
+     * card underneath the sheet the user is looking at.
+     */
+    @Volatile
+    var onChanged: (() -> Unit)? = null
+
     fun shown() {
         depth.incrementAndGet()
+        onChanged?.invoke()
     }
 
     fun hidden() {
         depth.updateAndGet { if (it > 0) it - 1 else 0 }
+        onChanged?.invoke()
     }
 }
 
@@ -119,8 +129,10 @@ object OwnCard {
  * returns the tree. The empty dump is the cover. Do not drop
  * `FLAG_NOT_FOCUSABLE` to catch system Back: on HyperOS the gesture follows the
  * focused activity, not this overlay, and a focusable card keeps the typing
- * IME off the field. Back is [net.kuafuai.andee.ScreenBodyService.onKeyEvent]
- * plus [net.kuafuai.andee.ui.CardBackActivity].
+ * IME off the field. A finger back-swipe is classified on the card
+ * ([net.kuafuai.andee.ui.NavGesture]); a real Back key is
+ * [net.kuafuai.andee.ui.CardBackActivity]. The accessibility key filter stays
+ * off — on HyperOS it stops gesture Back and Home from being generated.
  *
  * It exists because that is the same signature [ScreenController.reviveNote]
  * reads as a stale accessibility connection, and it sent a user off to toggle a

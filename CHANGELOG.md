@@ -4,7 +4,7 @@ Notable changes to Andee. The format follows [Keep a Changelog](https://keepacha
 
 ## Versioning policy
 
-- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`18` / `"0.5.9"`**.
+- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`19` / `"0.5.10"`**.
 - Releases are tagged `vMAJOR.MINOR.PATCH`, `versionName` mirrors the tag without the leading `v`,
   and `versionCode` increases by one per release. `versionCode` must increase **monotonically** or
   Android refuses the upgrade; the same number must never be reused for two different builds.
@@ -27,6 +27,14 @@ anything not built at a tag, identify it by the short commit hash it was built f
 hash into `versionName` at build time would close this hole; it is not implemented yet.)
 
 ## [Unreleased]
+
+## [0.5.10] - 2026-10-25
+
+On a Redmi K90 with the card open, system Back and the swipe up to the launcher did nothing. The folded ball, typing, and step-aside are unchanged.
+
+### Fixed
+
+- **Back folds the card, and Home reaches the launcher.** The expanded window stops above the navigation / home-gesture strip (`TYPE_APPLICATION_OVERLAY` sits on top of that strip, and `FLAG_NOT_TOUCHABLE` does not let the touch through on HyperOS). A back-swipe that still starts on the card folds it the same way ✕ does. The accessibility key filter stays off — turning it on was stopping HyperOS from generating those gestures at all. A Home that lands on the launcher folds the card and does not pull the back-catcher activity back over the desktop. A real Back key (3-button, `adb input keyevent 4`) still folds via `CardBackActivity`. The folded ball, the typing field, and the settings sheet do not take that path.
 
 ## [0.5.9] - 2026-10-25
 
