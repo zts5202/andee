@@ -4,7 +4,7 @@ Notable changes to Andee. The format follows [Keep a Changelog](https://keepacha
 
 ## Versioning policy
 
-- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`19` / `"0.5.10"`**.
+- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`20` / `"0.5.11"`**.
 - Releases are tagged `vMAJOR.MINOR.PATCH`, `versionName` mirrors the tag without the leading `v`,
   and `versionCode` increases by one per release. `versionCode` must increase **monotonically** or
   Android refuses the upgrade; the same number must never be reused for two different builds.
@@ -27,6 +27,14 @@ anything not built at a tag, identify it by the short commit hash it was built f
 hash into `versionName` at build time would close this hole; it is not implemented yet.)
 
 ## [Unreleased]
+
+## [0.5.11] - 2026-10-25
+
+The ball and the card are one window. Opening it no longer cuts from a ball to a card.
+
+### Changed
+
+- **Morph, same container.** Expand 360 ms (`cubic-bezier(0.2, 0.9, 0.25, 1)`), collapse 280 ms (`cubic-bezier(0.4, 0, 0.2, 1)`). Width, height and corner radius interpolate together. Chat content stays out until 40%, then fades and rises 8 dp. The sphere fades and turns over 180 ms. Resting size stays 28 dp — the idle window is already the circle, and 56 dp would eat taps around it. Press scales to 0.92 (80 ms) and springs back through 1.03 (220 ms). Drag lifts to 1.06 and a heavier shadow, 1:1 with the finger. A release inside 28% of the left or right edge snaps there in 320 ms and stays above the gesture strip; the ledge cling is unchanged. Showing the ball scales 0.6→1 (280 ms); hiding it scales 1→0.7 and fades (200 ms). Colours are untouched. The 0.5.10 nav clearance is the expanded end rect. Half-hide is not in this build.
 
 ## [0.5.10] - 2026-10-25
 
