@@ -78,13 +78,14 @@ class LocalBrain(
     private val onSweepSpent: (Int) -> Unit = {},
 ) {
 
-    private val llm = LlmClient(
-        baseUrl = cfg.baseUrl,
-        apiKey = cfg.apiKey,
-        model = cfg.model,
-        thinking = cfg.thinking,
-        reasoningEffort = cfg.reasoningEffort,
-    )
+    private         val llm = LlmClient(
+            baseUrl = cfg.baseUrl,
+            apiKey = cfg.apiKey,
+            model = cfg.model,
+            thinking = cfg.thinking,
+            reasoningEffort = cfg.reasoningEffort,
+            provider = cfg.provider,
+        )
 
     /**
      * Apply a settings change that is only about how the backend is asked —
@@ -807,11 +808,13 @@ class LocalBrain(
             // reads, not only the next one. A string compare, free when nothing
             // moved.
             if (step > 1) reseatPersona()
-            // Silent reviews ask without thinking. In thinking mode the
-            // backend wants every earlier assistant turn's reasoning sent back,
-            // and a review replays a long history whose reasoning was never
-            // kept, so it failed with HTTP 400 (seen 2026-10-20 and 10-21). A
-            // review is bookkeeping and loses little without it.
+            // Silent reviews ask without thinking. In thinking mode MiMo wants
+            // every earlier assistant turn's reasoning sent back, and a review
+            // replays a long history whose reasoning was never kept, so it
+            // failed with HTTP 400 (seen 2026-10-20 and 10-21). A review is
+            // bookkeeping and loses little without it. The log line names the
+            // model and thinking.type that this call actually sends.
+            host.logInfo(TAG, llm.requestLine(noThinking = internal))
             val reply = llm.complete(history, tools, noThinking = internal)
             if (gen != generation.get()) return
             turnTokens += reply.promptTokens + reply.completionTokens

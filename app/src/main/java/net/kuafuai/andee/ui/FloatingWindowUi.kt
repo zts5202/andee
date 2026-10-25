@@ -1,23 +1,30 @@
 package net.kuafuai.andee.ui
 
 import net.kuafuai.andee.ui.ball.label
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Outline
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.ColorDrawable
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.ViewOutlineProvider
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
+import android.view.animation.LinearInterpolator
+import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -35,6 +42,7 @@ import net.kuafuai.andee.ui.ball.EmotionBallTextureView
 import net.kuafuai.andee.ui.ball.Mood
 import net.kuafuai.andee.ui.ball.SPHERE_RADIUS_FRACTION
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -85,6 +93,10 @@ import kotlin.random.Random
  *   - Scrollback (bottom): its own touches, so it can scroll
  *   - Anywhere outside the circle in the ball area: passes through
  *
+ * Compact is not that layout. The folded window is only the ball — see
+ * [COMPACT_DP] — because an overlay does not forward a touch that lands inside
+ * its frame, however much of that frame is transparent.
+ *
  * Tap opens the mic and nothing else — deliberately not "tap, then unfold to
  * talk": the corner ball is there so you can ask about what you are looking
  * at, and covering it again to do so defeats it. Recognition state shows on
@@ -103,6 +115,7 @@ import kotlin.random.Random
  * in the bottom-right corner, which is what the card becomes — and stays —
  * whenever the assistant is driving the device underneath (every `screen.*`
  * command folds the card before it runs), plus whenever the user asks with ⤡.
+ * The compact window is that ball's own square, not a larger frame around it.
  * Both routes reach it through [setCompact]; the way back is a long-press on
  * the ball ([Listeners.onLongPress]) with exactly one caller that does not
  * wait for one: the service unfolds once at birth, so a device that just
@@ -200,6 +213,28 @@ class FloatingWindowUi(
 
         /** ⤡ in the subtitle band — the user asking for the screen back. */
         fun onMinimizeClick()
+
+        /**
+         * The card became the fullscreen surface, or folded back to the ball.
+         *
+         * Back is not delivered to this overlay on HyperOS (focus stays on the
+         * app behind it), so the service uses this to hold or drop the activity
+         * that receives a real Back *key*. A finger swipe is [onNavigateBack]
+         * and [onNavigateHome]. Default no-op.
+         */
+        fun onExpandedChanged(expanded: Boolean) {}
+
+        /**
+         * False while the folded ball, the typing field, or our own settings
+         * card should keep Back and Home. Default true.
+         */
+        fun wantsNavGesture(): Boolean = true
+
+        /** A finger back-swipe on the card. Same fold as ✕. */
+        fun onNavigateBack() {}
+
+        /** A finger swipe up from the bottom of the card. Fold, then go home. */
+        fun onNavigateHome() {}
 
         /**
          * Two taps on the ball — the user wants to type instead of talk.
@@ -434,7 +469,56 @@ class FloatingWindowUi(
 
     /** The window geometry [setTypingTop] borrowed, to be put back. */
     private var typingGeometry: IntArray? = null
+
+    /**
+     * A typing field is being opened or is open. Set before the activity
+     * starts, cleared only when the field is gone — not when the keyboard
+     * blips to 0 — so the overlay stays out of the EditText the whole time.
+     */
+    private var typingSession = false
     private var gesturePassthrough = false
+
+    /** Collapse has started; the window still covers the display until it finishes. */
+    private var morphing = false
+    private var morphCovering = false
+    private var morph: ValueAnimator? = null
+    private var morphGen = 0
+    private var morphRadiusPx = 0f
+    private var anchorX = 0
+    private var anchorY = 0
+
+    /** Press / drag scale. The idle window stays [COMPACT_DP]; this only grows it while the finger is down. */
+    private var gestureLayout = false
+    private var gestureScale = 1f
+    private var gestureAnim: ValueAnimator? = null
+    private var gestureGen = 0
+    private var draggingBall = false
+    private var logicalX = 0
+    private var logicalY = 0
+    private var pendingSettleMs = MorphMotion.SETTLE_MS
+
+    private var appearAnim: ValueAnimator? = null
+    private var appearGen = 0
+    private var dismissAnim: ValueAnimator? = null
+    private var dismissGen = 0
+    private var dismissing = false
+    private var breathing: ValueAnimator? = null
+
+    private val expandInterp = PathInterpolator(0.2f, 0.9f, 0.25f, 1f)
+    private val collapseInterp = PathInterpolator(0.4f, 0f, 0.2f, 1f)
+    private val edgeInterp = PathInterpolator(0.22f, 1f, 0.36f, 1f)
+
+    private val cardOutline = object : ViewOutlineProvider() {
+        override fun getOutline(view: View, outline: Outline) {
+            val maxR = min(view.width, view.height) / 2f
+            outline.setRoundRect(0, 0, view.width, view.height, morphRadiusPx.coerceIn(0f, maxR))
+        }
+    }
+    private val compactOutline = object : ViewOutlineProvider() {
+        override fun getOutline(view: View, outline: Outline) {
+            outline.setOval(0, 0, view.width, view.height)
+        }
+    }
 
     /** Whether the compositor is blurring behind us. See [Glass.frost]. */
     private var frosted = false
@@ -523,6 +607,17 @@ class FloatingWindowUi(
     /** Hops left in the current burst before the next long rest. */
     private var strollLeft = 0
 
+    /** One log line per process for the strip the expanded card leaves at the bottom. */
+    private var navClearanceLogged = false
+
+    /**
+     * Extra pixels taken off the bottom after the laid-out frame was measured
+     * still covering the gesture strip. Folded into the next frame so a later
+     * [applyWindow] does not grow the window back over it.
+     */
+    private var navTrimExtra = 0
+    private var navTrimPosted = false
+
     private var slide: ValueAnimator? = null
 
     fun isShown(): Boolean = root != null
@@ -539,6 +634,20 @@ class FloatingWindowUi(
      * to blend, whatever the card's own alpha happens to be.
      */
     fun show(): Boolean {
+        if (dismissing && root != null) {
+            dismissGen++
+            dismissAnim?.cancel()
+            dismissAnim = null
+            dismissing = false
+            root?.let {
+                it.scaleX = 1f
+                it.scaleY = 1f
+                it.alpha = 1f
+            }
+            applyWindow()
+            ui.post { if (root != null && compact && !morphing && !dismissing) playAppear() }
+            return true
+        }
         if (root != null) return true
         // Before the ball exists, so the first frame is already the look the
         // user left it on. A no-op when nothing is saved, and a no-op for a
@@ -566,7 +675,12 @@ class FloatingWindowUi(
             // FLAG_LAYOUT_IN_SCREEN alone is not enough: since API 30 the window
             // also fits the system-bar insets by default, so on the Honor phone a
             // MATCH_PARENT card still started below the status bar and stopped
-            // above the navigation bar. Zero lets the card cover the display.
+            // above the navigation bar. Zero lets the top of the card run under
+            // the status bar. The bottom is a different question: this window
+            // type is drawn *above* the navigation bar, so a full-height window
+            // eats Home and the back button. [applyExpandedFrame] stops the
+            // height above that strip. Do not put the zero back and also grow
+            // the height to the display bottom.
             fitInsetsTypes = 0
             layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
@@ -578,6 +692,8 @@ class FloatingWindowUi(
         // the screen.
         homeX = p.x
         homeY = p.y
+        logicalX = p.x
+        logicalY = p.y
         // Keep the restore target, but add the overlay already compact.
         //
         // This used to carry a second reason — "no frame in which a newly
@@ -612,18 +728,25 @@ class FloatingWindowUi(
             params = p
             syncCover()
             applyCompactAppearance()
+            // show() is the compact window. [setCompact] is a no-op from this
+            // state, so the blur, alpha and touch flags have to be applied
+            // here — a later fold that finds them already right is the point.
+            applyWindow()
             // Only now can [winYOrigin] be measured, and the resting position
             // depends on it — the y above is a first guess that is correct only
             // where the offset is 0.
             ui.post {
                 refreshWinYOrigin()
                 val pp = params ?: return@post
-                if (!perchApplied) {
+                if (!perchApplied && !morphing && !gestureLayout) {
                     pp.y = compactHomeY()
                     homeX = pp.x
                     homeY = pp.y
+                    logicalX = pp.x
+                    logicalY = pp.y
                     runCatching { wm.updateViewLayout(v, pp) }
                 }
+                if (compact && !morphing && !dismissing) playAppear()
             }
             retimeStroll()
             true
@@ -696,11 +819,10 @@ class FloatingWindowUi(
             View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
         )
-        // The tail tip reaches into the ball area's transparent padding, down
-        // to where the renderer's raised paws are — that overlap is what makes
-        // the board read as held rather than as hovering a thumb's width
-        // above the head.
-        val overlap = (side * SIGN_OVERLAP_FRACTION).toInt()
+        // The sphere fills the ball area, so the tail only needs a few dp of
+        // overlap to read as held. The old fraction was calibrated against a
+        // large transparent pad; using it now would bury the tail in the head.
+        val overlap = dp(SIGN_OVERLAP_DP)
         val h = content.measuredHeight + side - overlap
         // Ball keeps its spot. If it is hanging off the ledge, use the
         // climb-back target: holding a sign and gripping a ledge are two
@@ -881,29 +1003,102 @@ class FloatingWindowUi(
      *
      * Main thread only, via the usual post.
      */
-    fun setTypingTop(topPx: Int) {
+    /**
+     * Move the overlay off the typing field *before* the activity and the IME
+     * exist. HyperOS does not pass touches through an overlay rectangle, so
+     * [FLAG_NOT_TOUCHABLE] alone still eats the EditText. The measured edge
+     * ([setTypingTop]) replaces this guess once the keyboard has a height.
+     *
+     * Runs the unfold on this same turn when the ball was folded: posting it
+     * separately let the activity start under a still-fullscreen card.
+     */
+    fun prepareForTyping(onReady: () -> Unit) {
         ui.post {
-            if (typingTop == topPx) return@post
-            typingTop = topPx
-            applyTypingTop()
+            if (root == null) return@post
+            typingSession = true
+            if (compact) {
+                compact = false
+                syncCover()
+                exitCompact()
+                // Not [Listeners.onExpandedChanged]. That starts the back
+                // catcher in this same turn, and the catcher then fights the
+                // typing activity for the IME.
+            }
+            val p = params
+            if (p != null && !compact) {
+                if (typingGeometry == null) {
+                    typingGeometry = intArrayOf(p.x, p.y, p.width, p.height)
+                }
+                val safe = clearanceHeight(provisionalStripTop())
+                // MATCH_PARENT is -1. Never grow a window that is already
+                // clear of the field — growing is a second layout, and it can
+                // cover the EditText the provisional guess was short of.
+                if (p.height < 0 || p.height > safe) p.height = safe
+                inputPill?.visibility = View.INVISIBLE
+                typingTop = provisionalStripTop()
+            }
+            applyWindow()
+            onReady()
         }
     }
 
-    private fun applyTypingTop() {
+    /** The field is gone. Put the card back and let Back fold it again. */
+    fun endTypingSession() {
+        ui.post {
+            typingSession = false
+            typingTop = 0
+            if (typingGeometry != null) applyTypingTop() else applyWindow()
+            listeners.onExpandedChanged(root != null && !compact)
+        }
+    }
+
+    /** Main thread. System Back should fold the card. */
+    fun wantsSystemBack(): Boolean =
+        root != null && !compact && !away && !typingSession && typingTop == 0
+
+    fun setTypingTop(topPx: Int) {
+        ui.post {
+            // 0 is a keyboard blip, or the keys leaving as the field closes.
+            // Growing the card back over the EditText on that is a layout, and
+            // it covers the field if the IME comes straight back. [endTypingSession]
+            // restores once, when the field is actually gone.
+            if (!typingSession || topPx <= 0) return@post
+            shrinkForField(topPx)
+        }
+    }
+
+    /**
+     * Shorten the overlay so it ends above [stripTopOnScreen].
+     *
+     * Only shortens, and only when the current height would still cover the
+     * field. A candidate row that jitters a few pixels used to call
+     * [applyWindow] — frost, repaint, two `updateViewLayout`s — on every inset.
+     * That is the typing hitch. A gap above the field is harmless; covering
+     * the field is not.
+     */
+    private fun shrinkForField(stripTopOnScreen: Int) {
         val v = root ?: return
         val p = params ?: return
-        if (typingTop > 0) {
-            // Folded, the window is a corner square that is nowhere near the
-            // field; there is nothing to step aside from.
-            if (compact) return
-            if (typingGeometry == null) {
-                typingGeometry = intArrayOf(p.x, p.y, p.width, p.height)
-            }
-            p.height = maxOf(dp(MIN_TYPING_CARD_DP), typingTop)
-            // The real field is up now, right under this edge: the pill would be a second, dead copy of it.
-            inputPill?.visibility = View.INVISIBLE
-            runCatching { wm.updateViewLayout(v, p) }
-        } else if (compact) {
+        if (compact) return
+        val safe = clearanceHeight(stripTopOnScreen)
+        // 8 dp is the same margin already reserved above the field. Inside it,
+        // a candidate-bar jitter must not relayout the card. Past it, shrink.
+        if (p.height > 0 && p.height <= safe + dp(8)) {
+            typingTop = stripTopOnScreen
+            return
+        }
+        if (typingGeometry == null) {
+            typingGeometry = intArrayOf(p.x, p.y, p.width, p.height)
+        }
+        typingTop = stripTopOnScreen
+        p.height = safe
+        inputPill?.visibility = View.INVISIBLE
+        runCatching { wm.updateViewLayout(v, p) }
+    }
+
+    private fun applyTypingTop() {
+        if (root == null || params == null) return
+        if (compact) {
             // A fold in between owns the geometry now; just forget the snapshot.
             typingGeometry = null
         } else {
@@ -913,30 +1108,109 @@ class FloatingWindowUi(
         applyWindow()
     }
 
-    /** Put back the geometry [setTypingBand] borrowed. */
+    /**
+     * End the overlay above [stripTopOnScreen].
+     *
+     * A `MATCH_PARENT` overlay's frame does not start at `p.y`. On phones it
+     * starts at the content frame (status-bar height, measured 126 px on an
+     * Honor with `p.y = 0`). Setting `height` to the strip's screen Y then
+     * extends that many pixels *into* the field, which is the EditText and the
+     * Chinese candidate row. Subtract the frame's real top, and never apply a
+     * minimum that crosses the strip — a short card is usable, a covered field
+     * is not.
+     */
+    private fun clearanceHeight(stripTopOnScreen: Int): Int {
+        val margin = dp(8)
+        return (stripTopOnScreen - frameTopOnScreen() - margin).coerceAtLeast(dp(48))
+    }
+
+    /** Where a keyboard, its candidate row and the field usually sit, before the first inset. */
+    private fun provisionalStripTop(): Int {
+        val screenH = context.resources.displayMetrics.heightPixels
+        return (screenH - dp(480)).coerceAtLeast(dp(160))
+    }
+
+    private fun frameTopOnScreen(): Int {
+        val v = root ?: return 0
+        if (!v.isLaidOut) return 0
+        val loc = IntArray(2)
+        v.getLocationOnScreen(loc)
+        return loc[1].coerceAtLeast(0)
+    }
+
+    /**
+     * Put back the geometry a typing session borrowed.
+     *
+     * Params only. The caller pushes — [applyWindow] after a session, or
+     * [setCompact] after a fold. Pushing here as well laid the window out
+     * twice, and a fold would flash the full card for a frame on the way
+     * down to the ball.
+     */
     private fun restoreTypingGeometry() {
         inputPill?.visibility = View.VISIBLE
         val g = typingGeometry ?: return
         typingGeometry = null
-        val v = root ?: return
         val p = params ?: return
         p.x = g[0]
         p.y = g[1]
         p.width = g[2]
         p.height = g[3]
-        runCatching { wm.updateViewLayout(v, p) }
     }
 
     fun hide(): Boolean {
         val v = root ?: return true
+        if (dismissing) return true
+        ui.removeCallbacks(strollRunnable)
+        slide?.cancel()
+        parkedFrom = null
+        stopBreathing()
+        cancelGesture()
+        morphGen++
+        morph?.cancel()
+        morph = null
+        morphing = false
+        morphCovering = false
+        listeners.onExpandedChanged(false)
+        syncCover()
+        val scale = motionScale()
+        if (scale == 0f) return removeWindow()
+        dismissing = true
+        applyWindow()
+        centerPivot(v)
+        val from = v.scaleX.coerceIn(MorphMotion.DISMISS_TO, 1f)
+        dismissGen++
+        val gen = dismissGen
+        dismissAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = MorphMotion.DISMISS_MS
+            interpolator = collapseInterp
+            addUpdateListener {
+                if (gen != dismissGen || root == null) return@addUpdateListener
+                val t = it.animatedValue as Float
+                v.scaleX = from + (MorphMotion.DISMISS_TO - from) * t
+                v.scaleY = v.scaleX
+                v.alpha = 1f - t
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    if (gen != dismissGen) return
+                    removeWindow()
+                }
+            })
+            start()
+        }
+        return true
+    }
+
+    private fun removeWindow(): Boolean {
+        val v = root ?: return true
         return try {
-            ui.removeCallbacks(strollRunnable)
-            slide?.cancel()
-            parkedFrom = null
+            dismissing = false
+            dismissAnim = null
             wm.removeView(v)
             root = null
             params = null
             ball = null
+            morphCovering = false
             syncCover()
             true
         } catch (_: Throwable) {
@@ -1318,6 +1592,9 @@ class FloatingWindowUi(
             if (this.away == away) return@post
             this.away = away
             applyWindow()
+            // The camera / picker must get Back. Coming back, the expanded
+            // card needs the catcher again.
+            listeners.onExpandedChanged(root != null && !compact && !this.away)
         }
     }
 
@@ -1335,19 +1612,42 @@ class FloatingWindowUi(
      * tappable in its own small rectangle while every other pixel belongs to
      * the user.
      *
-     * Idempotent, and there is nothing time-based in here — this is a resting
-     * state, not a timed peek. Ending it is the caller's business, since when
-     * to come back isn't ours to decide.
+     * Idempotent. The resting state is still the caller's to end; what changed
+     * is that getting there is one window changing shape, not a cut.
+     * Expand is 360 ms, collapse 280 ms. Content fades only after 40%.
+     * A duration scale of 0 snaps the same container — still not a second view.
      */
     fun setCompact(compact: Boolean) {
         ui.post {
-            if (this.compact == compact) return@post
+            if (root == null) {
+                this.compact = compact
+                return@post
+            }
+            if (this.compact == compact && !morphing) return@post
+            if (morphing && morphTargetIsCompact == compact) return@post
             this.compact = compact
+            morphCovering = compact
             syncCover()
-            if (compact) enterCompact() else exitCompact()
-            applyWindow()
+            listeners.onExpandedChanged(!compact && root != null && !away)
+            cancelGesture()
+            morphGen++
+            morph?.cancel()
+            morph = null
+            morphing = false
+            if (motionScale() == 0f) {
+                morphing = false
+                morphCovering = false
+                if (compact) enterCompact() else exitCompact()
+                syncCover()
+                applyWindow()
+                return@post
+            }
+            if (compact) startCollapse() else startExpand()
         }
     }
+
+    /** Direction of the morph that is running, so a repeat of the same request is a no-op. */
+    private var morphTargetIsCompact = false
 
     /**
      * Publish "this window is covering the display" for the two readers that
@@ -1359,7 +1659,15 @@ class FloatingWindowUi(
      * only, like everything that touches these two fields.
      */
     private fun syncCover() {
-        FullscreenCard.covering = root != null && !compact
+        // A collapse flips [compact] at the start so Back stops catching, but
+        // the window is still the card until the morph finishes. Clearing
+        // covering on that first frame is the empty-tree lie. An expand does
+        // the opposite: covering waits until the window is actually tall, so
+        // the first frames of a 28 dp ball are not reported as a fullscreen card.
+        val tall = (params?.height ?: 0) > context.resources.displayMetrics.heightPixels / 3
+        FullscreenCard.covering = root != null && (
+            morphCovering || (!compact && (!morphing || tall))
+            )
     }
 
     /**
@@ -1523,10 +1831,10 @@ class FloatingWindowUi(
             val area: View = v.ballAreaView ?: v
             val loc = IntArray(2)
             area.getLocationOnScreen(loc)
-            // The same two numbers the renderer uses: the sphere is a fixed
-            // fraction of the surface's shorter side, times the view scale the
-            // ball is drawn at (1f when folded — see applyCompactAppearance).
-            val scale = if (compact) 1f else BALL_SCALE
+            // The same two numbers the renderer uses, times the view scale.
+            // Folded, that scale fills the window with the sphere — see
+            // [COMPACT_BALL_SCALE].
+            val scale = if (compact) COMPACT_BALL_SCALE else BALL_SCALE
             val r = (min(area.width, area.height) * SPHERE_RADIUS_FRACTION * scale).toInt()
             val cx = loc[0] + area.width / 2
             // The sphere may be drawn below the area's centre while it is
@@ -1610,7 +1918,7 @@ class FloatingWindowUi(
      */
     private fun perchY(): Int {
         val side = dp(COMPACT_DP)
-        val r = side * SPHERE_RADIUS_FRACTION
+        val r = visualRadiusPx().toFloat()
         val edge = bottomEdge()
         return (edge + r * (2f * CLING_HIDDEN - 1f) - side / 2f).toInt() - winYOrigin
     }
@@ -1664,15 +1972,29 @@ class FloatingWindowUi(
     }
 
     /**
-     * Transparent margin between the compact window's edge and the drawn
-     * sphere, px. The sphere is [SPHERE_RADIUS_FRACTION] of the side and centred,
-     * so most of the window is empty air — which is why clamping the *window* to
-     * the screen would strand the ball a thumb's width short of every edge.
-     * Clamp against this instead and the ball can sit flush.
+     * Gap between the compact window's edge and the drawn sphere, px.
+     *
+     * With [COMPACT_BALL_SCALE] the sphere fills the window, so this is ~0.
+     * Clamping against the old unscaled pad would let most of the ball slide
+     * off the screen.
      */
     private fun spherePad(): Int {
         val side = dp(COMPACT_DP)
-        return side / 2 - (side * SPHERE_RADIUS_FRACTION).toInt()
+        return (side / 2 - visualRadiusPx()).coerceAtLeast(0)
+    }
+
+    /**
+     * Radius of the sphere as drawn in the compact window, px.
+     *
+     * [COMPACT_BALL_SCALE] blows the renderer's fixed fraction up until the
+     * sphere fills the window. Layout that still used the unscaled fraction
+     * would keep a thumb of "transparent air" in every clamp and then let the
+     * ball slide that far off the screen.
+     */
+    private fun visualRadiusPx(): Int {
+        val side = dp(COMPACT_DP)
+        val frac = SPHERE_RADIUS_FRACTION * COMPACT_BALL_SCALE
+        return (side * frac).toInt().coerceIn(1, side / 2)
     }
 
     /**
@@ -1697,8 +2019,7 @@ class FloatingWindowUi(
      */
     private fun wantsPerch(y: Int): Boolean {
         val side = dp(COMPACT_DP)
-        val sphereBottom = y + winYOrigin + windowH() - side / 2 +
-            (side * SPHERE_RADIUS_FRACTION).toInt()
+        val sphereBottom = y + winYOrigin + windowH() - side / 2 + visualRadiusPx()
         return sphereBottom >= bottomEdge() - dp(SNAP_GRACE_DP)
     }
 
@@ -1751,15 +2072,48 @@ class FloatingWindowUi(
         val v = root ?: return
         val p = params ?: return
         if (!compact) return
-        clampCompact(p)
+        if (!gestureLayout) {
+            clampCompact(p)
+            if (perchApplied) {
+                perchedByUser = true
+                slideTo(perchX(), perchY(), SNAP_MS)
+            } else {
+                homeX = p.x
+                homeY = p.y
+                logicalX = p.x
+                logicalY = p.y
+            }
+            runCatching { wm.updateViewLayout(v, p) }
+            return
+        }
+        clampLogical()
         if (perchApplied) {
             perchedByUser = true
+            pendingSettleMs = SNAP_MS
             slideTo(perchX(), perchY(), SNAP_MS)
-        } else {
-            homeX = p.x
-            homeY = p.y
+            return
         }
-        runCatching { wm.updateViewLayout(v, p) }
+        val side = dp(COMPACT_DP)
+        val edge = MorphMotion.edgeSnap(logicalX, side, context.resources.displayMetrics.widthPixels)
+        val y = safeCompactY(logicalY)
+        val x = when (edge) {
+            MorphMotion.Edge.LEFT, MorphMotion.Edge.RIGHT -> edgeX(edge)
+            null -> logicalX
+        }
+        homeX = x
+        homeY = y
+        if (edge != null) {
+            pendingSettleMs = MorphMotion.EDGE_SNAP_MS
+            slideTo(x, y, MorphMotion.EDGE_SNAP_MS, edgeSnap = true)
+        } else if (x != logicalX || y != logicalY) {
+            pendingSettleMs = MorphMotion.SETTLE_MS
+            slideTo(x, y, MorphMotion.SETTLE_MS)
+        } else {
+            pendingSettleMs = MorphMotion.SETTLE_MS
+            logicalX = x
+            logicalY = y
+            layoutGesture(gestureScale)
+        }
     }
 
     /**
@@ -1797,26 +2151,48 @@ class FloatingWindowUi(
      *
      * Main thread only.
      */
-    private fun slideTo(targetX: Int, targetY: Int, ms: Long = PERCH_SLIDE_MS) {
+    private fun slideTo(targetX: Int, targetY: Int, ms: Long = PERCH_SLIDE_MS, edgeSnap: Boolean = false) {
         val v = root ?: return
         val p = params ?: return
         slide?.cancel()
-        if (p.x == targetX && p.y == targetY) return
-        val fromX = p.x
-        val fromY = p.y
+        val fromX = if (gestureLayout) logicalX else p.x
+        val fromY = if (gestureLayout) logicalY else p.y
+        if (fromX == targetX && fromY == targetY) return
         val dx = targetX - fromX
         val dy = targetY - fromY
+        val overshoot = if (edgeSnap) dp(MorphMotion.EDGE_OVERSHOOT_DP) else 0
         slide = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = ms
-            interpolator = DecelerateInterpolator()
+            interpolator = if (edgeSnap) edgeInterp else DecelerateInterpolator()
             addUpdateListener { a ->
                 val t = a.animatedValue as Float
-                p.x = fromX + (dx * t).roundToInt()
-                p.y = fromY + (dy * t).roundToInt()
-                runCatching { wm.updateViewLayout(v, p) }
+                var x = fromX + (dx * t).roundToInt()
+                val y = fromY + (dy * t).roundToInt()
+                if (overshoot > 0 && dx != 0 && t > 0f && t < 1f) {
+                    val dir = if (dx > 0) 1 else -1
+                    val peak = 0.82f
+                    val mag = if (t < peak) t / peak else (1f - t) / (1f - peak)
+                    x += (dir * overshoot * mag).roundToInt()
+                }
+                logicalX = x
+                logicalY = y
+                if (gestureLayout && compact) {
+                    layoutGesture(gestureScale)
+                } else {
+                    p.x = x
+                    p.y = y
+                    runCatching { wm.updateViewLayout(v, p) }
+                }
             }
-            addListener(object : android.animation.AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: android.animation.Animator) {
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    logicalX = targetX
+                    logicalY = targetY
+                    if (!(gestureLayout && compact)) {
+                        p.x = targetX
+                        p.y = targetY
+                        runCatching { wm.updateViewLayout(v, p) }
+                    }
                     // The geometry is now truly where perchApplied said it was.
                     // This is the moment the cling (paws, half-sunk body) may
                     // start — before it, the ball was travelling and a cling
@@ -1902,8 +2278,11 @@ class FloatingWindowUi(
      * larger, harder-edged, and unable to squash or hop with the ball it is
      * supposed to be part of.
      *
-     * Ball at view scale 1: [BALL_SCALE] is the full card's magnification, and
-     * a corner square has nothing to magnify into.
+     * Ball at [COMPACT_BALL_SCALE]: the renderer's sphere is a fixed fraction
+     * of the surface, and that fraction left most of this square transparent.
+     * Scaling the view up fills the square with the sphere. Horns and gestures
+     * that stick out clip at the window edge — growing the window to keep them
+     * would put a touch-eating margin back around the ball.
      *
      * Main thread only.
      */
@@ -1914,15 +2293,17 @@ class FloatingWindowUi(
         sceneChip?.visibility = View.GONE
         muteKey?.visibility = View.GONE
         // Not just invisible — GONE, so the ball area has the whole window to
-        // itself. A scrollback left in the layout would cover most of a 168dp
-        // square and there would be nothing left to see the ball in.
+        // itself. A scrollback left in the layout would cover the square and
+        // there would be nothing left to see the ball in.
         historyView?.visibility = View.GONE
         tipsView?.visibility = View.GONE
         // The whole square is the ball's, so the sphere is centred in it and
         // sized against it.
         setBallAreaHeight(FrameLayout.LayoutParams.MATCH_PARENT)
-        ball?.scaleX = 1f
-        ball?.scaleY = 1f
+        ball?.scaleX = COMPACT_BALL_SCALE
+        ball?.scaleY = COMPACT_BALL_SCALE
+        ball?.alpha = 1f
+        ball?.rotation = 0f
         // The corner square has no cluster to dodge, so the ball sits dead
         // centre again — and the fold animation lands from wherever it was.
         ball?.translationY = 0f
@@ -1952,7 +2333,7 @@ class FloatingWindowUi(
      */
     private fun refitCardAreas() {
         val r = root ?: return
-        if (compact) return
+        if (compact || morphing) return
         val h = r.height
         if (h <= 0) return
         // While a field is up this window is shorter than the card it is
@@ -2111,6 +2492,479 @@ class FloatingWindowUi(
         v.layoutParams = lp
     }
 
+    private fun motionScale(): Float =
+        runCatching {
+            Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+        }.getOrDefault(1f)
+
+    private fun centerPivot(v: View) {
+        val w = if (v.width > 0) v.width else (params?.width?.takeIf { it > 0 } ?: dp(COMPACT_DP))
+        val h = if (v.height > 0) v.height else (params?.height?.takeIf { it > 0 } ?: dp(COMPACT_DP))
+        v.pivotX = w / 2f
+        v.pivotY = h / 2f
+    }
+
+    private fun playAppear() {
+        val v = root ?: return
+        if (morphing || dismissing || motionScale() == 0f) return
+        appearGen++
+        val gen = appearGen
+        appearAnim?.cancel()
+        centerPivot(v)
+        v.scaleX = MorphMotion.APPEAR_FROM
+        v.scaleY = MorphMotion.APPEAR_FROM
+        v.alpha = 0f
+        appearAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = MorphMotion.APPEAR_MS
+            interpolator = expandInterp
+            addUpdateListener {
+                if (gen != appearGen || root == null) return@addUpdateListener
+                val t = it.animatedValue as Float
+                val s = MorphMotion.APPEAR_FROM + (1f - MorphMotion.APPEAR_FROM) * t
+                v.scaleX = s
+                v.scaleY = s
+                if (!captureHidden && !away) v.alpha = t
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    if (gen != appearGen || root == null) return
+                    v.scaleX = 1f
+                    v.scaleY = 1f
+                    if (!captureHidden && !away) v.alpha = 1f
+                    startBreathing()
+                }
+            })
+            start()
+        }
+    }
+
+    private fun cancelAppear() {
+        appearGen++
+        appearAnim?.cancel()
+        appearAnim = null
+        root?.let {
+            it.scaleX = 1f
+            it.scaleY = 1f
+            if (!captureHidden && !away && !dismissing) it.alpha = 1f
+        }
+    }
+
+    private fun startBreathing() {
+        if (motionScale() == 0f || !compact || morphing || draggingBall || dismissing || gestureLayout) return
+        if (breathing?.isRunning == true) return
+        val v = root ?: return
+        breathing = ValueAnimator.ofFloat(0.18f, 0.28f).apply {
+            duration = 1_200L
+            repeatMode = ValueAnimator.REVERSE
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = LinearInterpolator()
+            addUpdateListener {
+                if (!compact || morphing || draggingBall || gestureLayout) return@addUpdateListener
+                val a = ((it.animatedValue as Float) * 255f).roundToInt().coerceIn(0, 255)
+                val c = Color.argb(a, 0, 0, 0)
+                v.outlineAmbientShadowColor = c
+                v.outlineSpotShadowColor = c
+            }
+            start()
+        }
+    }
+
+    private fun stopBreathing() {
+        breathing?.cancel()
+        breathing = null
+    }
+
+    private fun cancelGesture() {
+        gestureGen++
+        gestureAnim?.cancel()
+        gestureAnim = null
+        if (!gestureLayout) {
+            gestureScale = 1f
+            draggingBall = false
+            return
+        }
+        val p = params
+        val v = root
+        gestureLayout = false
+        gestureScale = 1f
+        draggingBall = false
+        if (p != null && v != null && compact && !morphing) {
+            p.width = dp(COMPACT_DP)
+            p.height = dp(COMPACT_DP)
+            p.x = logicalX
+            p.y = logicalY
+            runCatching { wm.updateViewLayout(v, p) }
+        }
+    }
+
+    private fun animateGesture(target: Float, ms: Long, spring: Boolean) {
+        if (!gestureLayout || morphing) return
+        val gen = ++gestureGen
+        gestureAnim?.cancel()
+        val from = gestureScale
+        if (motionScale() == 0f) {
+            val end = if (spring) 1f else target
+            layoutGesture(end)
+            if (end == 1f && !draggingBall) finishGestureLayout()
+            return
+        }
+        gestureAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = ms
+            interpolator = if (spring) LinearInterpolator() else DecelerateInterpolator()
+            addUpdateListener {
+                if (gen != gestureGen || !gestureLayout) return@addUpdateListener
+                val u = it.animatedValue as Float
+                val s = if (spring) MorphMotion.releaseScale(u, from) else from + (target - from) * u
+                layoutGesture(s)
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    if (gen != gestureGen || !gestureLayout) return
+                    val end = if (spring) 1f else target
+                    layoutGesture(end)
+                    if (end == 1f && !draggingBall) finishGestureLayout()
+                }
+            })
+            start()
+        }
+    }
+
+    /** Logical compact origin, scaled around its centre so 1.03 / 1.06 are not clipped. */
+    private fun layoutGesture(scale: Float) {
+        val v = root ?: return
+        val p = params ?: return
+        if (!compact || morphing || !gestureLayout) return
+        gestureScale = scale
+        val base = dp(COMPACT_DP)
+        val grown = (base * scale).roundToInt().coerceAtLeast(1)
+        val extra = grown - base
+        p.width = grown
+        p.height = grown
+        p.x = logicalX - extra / 2
+        p.y = logicalY - extra / 2
+        val lift = ((scale - 1f) / (MorphMotion.DRAG_SCALE - 1f)).coerceIn(0f, 1f)
+        val elevDp = MorphMotion.REST_ELEVATION_DP +
+            (MorphMotion.DRAG_ELEVATION_DP - MorphMotion.REST_ELEVATION_DP) * lift
+        v.elevation = elevDp * context.resources.displayMetrics.density
+        val shadowA = if (scale > 1.02f) 0.28f else 0.22f
+        val c = Color.argb((shadowA * 255f).roundToInt(), 0, 0, 0)
+        v.outlineAmbientShadowColor = c
+        v.outlineSpotShadowColor = c
+        runCatching { wm.updateViewLayout(v, p) }
+    }
+
+    private fun finishGestureLayout() {
+        gestureLayout = false
+        gestureScale = 1f
+        val p = params ?: return
+        val v = root ?: return
+        if (!compact || morphing) return
+        p.width = dp(COMPACT_DP)
+        p.height = dp(COMPACT_DP)
+        p.x = logicalX
+        p.y = logicalY
+        v.elevation = MorphMotion.REST_ELEVATION_DP * context.resources.displayMetrics.density
+        val c = Color.argb((0.22f * 255f).roundToInt(), 0, 0, 0)
+        v.outlineAmbientShadowColor = c
+        v.outlineSpotShadowColor = c
+        runCatching { wm.updateViewLayout(v, p) }
+        startBreathing()
+    }
+
+    private fun clampLogical() {
+        val side = dp(COMPACT_DP)
+        val pad = spherePad()
+        val dm = context.resources.displayMetrics
+        logicalX = logicalX.coerceIn(-pad, dm.widthPixels - side + pad)
+        logicalY = logicalY.coerceIn(-pad - winYOrigin, perchY())
+    }
+
+    /** Above the status bar and above the gesture strip. The ledge perch is a separate pose. */
+    private fun safeCompactY(y: Int): Int {
+        val inset = wm.currentWindowMetrics.windowInsets
+            .getInsetsIgnoringVisibility(WindowInsets.Type.statusBars() or WindowInsets.Type.displayCutout())
+            .top
+        val top = inset - winYOrigin
+        val bottom = compactHomeY()
+        return y.coerceIn(min(top, bottom), max(top, bottom))
+    }
+
+    private fun edgeX(edge: MorphMotion.Edge): Int {
+        val side = dp(COMPACT_DP)
+        val margin = dp(COMPACT_MARGIN_DP)
+        val w = context.resources.displayMetrics.widthPixels
+        return when (edge) {
+            MorphMotion.Edge.LEFT -> margin
+            MorphMotion.Edge.RIGHT -> w - side - margin
+        }
+    }
+
+    private fun resolvedRect(): Rect {
+        val p = params ?: return Rect()
+        val b = wm.currentWindowMetrics.bounds
+        val w = if (p.width > 0) p.width else b.width()
+        val h = if (p.height > 0) p.height else (b.height() - systemNavClearancePx() - navTrimExtra).coerceAtLeast(dp(200))
+        return Rect(p.x, p.y, p.x + w, p.y + h)
+    }
+
+    private fun prepareBallPin() {
+        val area = root?.ballAreaView ?: return
+        val lp = area.layoutParams as? FrameLayout.LayoutParams ?: return
+        val side = dp(COMPACT_DP)
+        lp.width = side
+        lp.height = side
+        lp.gravity = Gravity.TOP or Gravity.START
+        lp.leftMargin = 0
+        lp.topMargin = 0
+        area.layoutParams = lp
+        ball?.scaleX = COMPACT_BALL_SCALE
+        ball?.scaleY = COMPACT_BALL_SCALE
+        ball?.translationY = 0f
+    }
+
+    private fun pinBall() {
+        val area = root?.ballAreaView ?: return
+        val p = params ?: return
+        area.translationX = (anchorX - p.x).toFloat()
+        area.translationY = (anchorY - p.y).toFloat()
+    }
+
+    private fun morphChrome(): List<View> = listOfNotNull(
+        topBarView,
+        historyView,
+        tipsView,
+        muteKey,
+        if (sceneTitle != null) sceneChip else null,
+    )
+
+    private fun applyMorphFrame(lerp: Float, expandT: Float, expanding: Boolean, from: Rect, to: Rect) {
+        val p = params ?: return
+        val v = root ?: return
+        val l = from.left + ((to.left - from.left) * lerp).roundToInt()
+        val top = from.top + ((to.top - from.top) * lerp).roundToInt()
+        val r = from.right + ((to.right - from.right) * lerp).roundToInt()
+        val b = from.bottom + ((to.bottom - from.bottom) * lerp).roundToInt()
+        p.gravity = Gravity.TOP or Gravity.START
+        p.x = l
+        p.y = top
+        p.width = (r - l).coerceAtLeast(1)
+        p.height = (b - top).coerceAtLeast(1)
+        val startSide = if (expanding) from.width() else to.width()
+        morphRadiusPx = MorphMotion.cornerRadiusPx(
+            expandT,
+            startSide.toFloat(),
+            dp(MorphMotion.CORNER_CARD_DP).toFloat(),
+        )
+        v.invalidateOutline()
+        val (alpha, slide) = MorphMotion.content(expandT)
+        val slidePx = MorphMotion.CONTENT_SLIDE_DP * context.resources.displayMetrics.density * slide
+        backdrop?.let {
+            if (alpha <= 0f) {
+                it.visibility = View.GONE
+            } else {
+                it.visibility = View.VISIBLE
+                it.alpha = alpha
+                it.translationY = 0f
+            }
+        }
+        for (child in morphChrome()) {
+            if (alpha <= 0f) {
+                child.visibility = View.GONE
+            } else {
+                child.visibility = View.VISIBLE
+                child.alpha = alpha
+                child.translationY = slidePx
+            }
+        }
+        val icon = MorphMotion.iconAlpha(expandT, expanding)
+        ball?.alpha = icon
+        ball?.rotation = (1f - icon) * 80f
+        pinBall()
+        syncCover()
+        runCatching { wm.updateViewLayout(v, p) }
+    }
+
+    private fun resetMorphTransforms() {
+        ball?.alpha = 1f
+        ball?.rotation = 0f
+        root?.ballAreaView?.let { area ->
+            area.translationX = 0f
+            area.translationY = 0f
+            (area.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                lp.width = FrameLayout.LayoutParams.MATCH_PARENT
+                lp.height = FrameLayout.LayoutParams.MATCH_PARENT
+                lp.leftMargin = 0
+                lp.topMargin = 0
+                lp.gravity = Gravity.TOP or Gravity.START
+                area.layoutParams = lp
+            }
+        }
+        backdrop?.let {
+            it.alpha = 1f
+            it.translationY = 0f
+        }
+        for (child in morphChrome()) {
+            child.alpha = 1f
+            child.translationY = 0f
+        }
+        sceneChip?.let {
+            it.alpha = 1f
+            it.translationY = 0f
+        }
+    }
+
+    private fun expandedRect(): Rect {
+        val b = wm.currentWindowMetrics.bounds
+        val h = (b.height() - systemNavClearancePx() - navTrimExtra).coerceAtLeast(dp(200))
+        return Rect(0, 0, b.width(), h)
+    }
+
+    private fun compactTargetRect(): Rect {
+        val side = dp(COMPACT_DP)
+        val dm = context.resources.displayMetrics
+        val x = if (perched) perchX() else dm.widthPixels - side - dp(COMPACT_MARGIN_DP)
+        var y = compactHomeY()
+        homeX = x
+        homeY = y
+        perchApplied = perched
+        if (perched) y = perchY()
+        logicalX = x
+        logicalY = y
+        return Rect(x, y, x + side, y + side)
+    }
+
+    private fun startExpand() {
+        val p = params ?: return
+        val v = root ?: return
+        morphTargetIsCompact = false
+        cancelAppear()
+        slide?.cancel()
+        stopBreathing()
+        evictSignboard()
+        perchApplied = false
+        if (gestureLayout) {
+            p.width = dp(COMPACT_DP)
+            p.height = dp(COMPACT_DP)
+            p.x = logicalX
+            p.y = logicalY
+            gestureLayout = false
+            gestureScale = 1f
+        }
+        val from = Rect(p.x, p.y, p.x + p.width.coerceAtLeast(1), p.y + p.height.coerceAtLeast(1))
+        val to = expandedRect()
+        anchorX = from.left
+        anchorY = from.top
+        v.setBackgroundColor(Color.parseColor(Glass.CARD_SOLID))
+        prepareBallPin()
+        morphing = true
+        applyMotionChrome()
+        android.util.Log.i("Body", "morph: expand ${MorphMotion.EXPAND_MS}ms")
+        runMorph(from, to, expanding = true, duration = MorphMotion.EXPAND_MS, interp = expandInterp)
+    }
+
+    private fun startCollapse() {
+        val p = params ?: return
+        val v = root ?: return
+        morphTargetIsCompact = true
+        cancelAppear()
+        slide?.cancel()
+        stopBreathing()
+        evictSignboard()
+        val visual = resolvedRect()
+        // Snapshot the card the next unfold should grow back to, without
+        // pushing it — a typing hole must not become the saved geometry, and
+        // pushing it here would flash the full card before the shrink.
+        restoreTypingGeometry()
+        fullGeometry = intArrayOf(p.x, p.y, p.width, p.height)
+        val to = compactTargetRect()
+        anchorX = to.left
+        anchorY = to.top
+        v.setBackgroundColor(Color.parseColor(Glass.CARD_SOLID))
+        prepareBallPin()
+        morphing = true
+        applyMotionChrome()
+        android.util.Log.i("Body", "morph: collapse ${MorphMotion.COLLAPSE_MS}ms")
+        runMorph(visual, to, expanding = false, duration = MorphMotion.COLLAPSE_MS, interp = collapseInterp)
+    }
+
+    private fun runMorph(
+        from: Rect,
+        to: Rect,
+        expanding: Boolean,
+        duration: Long,
+        interp: android.view.animation.Interpolator,
+    ) {
+        morphGen++
+        val gen = morphGen
+        morph?.cancel()
+        morph = ValueAnimator.ofFloat(0f, 1f).apply {
+            this.duration = duration
+            interpolator = interp
+            addUpdateListener {
+                if (gen != morphGen) return@addUpdateListener
+                val u = it.animatedValue as Float
+                val expandT = if (expanding) u else 1f - u
+                applyMorphFrame(u, expandT, expanding, from, to)
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    if (gen != morphGen) return
+                    val expandT = if (expanding) 1f else 0f
+                    applyMorphFrame(1f, expandT, expanding, from, to)
+                    morphing = false
+                    morph = null
+                    if (expanding) finishExpand() else finishCollapse()
+                }
+            })
+            start()
+        }
+    }
+
+    private fun finishExpand() {
+        resetMorphTransforms()
+        exitCompact(keepGeometry = true)
+        morphCovering = false
+        syncCover()
+        applyWindow()
+    }
+
+    private fun finishCollapse() {
+        resetMorphTransforms()
+        morphCovering = false
+        applyCompactAppearance()
+        syncWorking()
+        retimeStroll()
+        syncCover()
+        applyWindow()
+        ui.post { reseatCompact() }
+    }
+
+    private fun applyMotionChrome() {
+        val v = root ?: return
+        if (morphing || !compact) {
+            v.outlineProvider = cardOutline
+            v.clipToOutline = true
+            if (!morphing) {
+                morphRadiusPx = dp(MorphMotion.CORNER_CARD_DP).toFloat()
+                v.elevation = 0f
+            } else {
+                v.elevation = MorphMotion.REST_ELEVATION_DP * context.resources.displayMetrics.density
+            }
+        } else {
+            v.outlineProvider = compactOutline
+            v.clipToOutline = false
+            if (!gestureLayout) {
+                v.elevation = MorphMotion.REST_ELEVATION_DP * context.resources.displayMetrics.density
+                if (breathing?.isRunning != true) {
+                    val c = Color.argb((0.22f * 255f).roundToInt(), 0, 0, 0)
+                    v.outlineAmbientShadowColor = c
+                    v.outlineSpotShadowColor = c
+                }
+            }
+        }
+        v.invalidateOutline()
+    }
+
     private fun enterCompact() {
         val p = params ?: return
         slide?.cancel()
@@ -2143,6 +2997,8 @@ class FloatingWindowUi(
         homeY = p.y
         perchApplied = perched
         if (perched) p.y = perchY()
+        logicalX = p.x
+        logicalY = p.y
         applyCompactAppearance()
         syncWorking()
         retimeStroll()
@@ -2173,11 +3029,12 @@ class FloatingWindowUi(
         if (winYOrigin == before) return
         homeY = compactHomeY()
         p.y = if (perchApplied) perchY() else homeY
+        logicalY = p.y
         runCatching { wm.updateViewLayout(v, p) }
     }
 
-    /** Main thread only. */
-    private fun exitCompact() {
+    /** Main thread only. [keepGeometry] when a morph already landed on the expanded rect. */
+    private fun exitCompact(keepGeometry: Boolean = false) {
         val p = params ?: return
         slide?.cancel()
         // Same eviction as the fold, in the other direction: the card grows
@@ -2185,22 +3042,24 @@ class FloatingWindowUi(
         // is meaningless inside it.
         evictSignboard()
         perchApplied = false
-        val g = fullGeometry ?: intArrayOf(
-            0, 0,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-        )
-        // Belt-and-braces: a stale stored geometry can be a compact-sized
-        // rectangle (service killed while folded, then restored). Growing the
-        // window to a corner square is worse than useless, so never restore
-        // anything smaller than about a third of the screen.
-        val dm = context.resources.displayMetrics
-        if (g[2] >= dm.widthPixels / 3 && g[3] >= dm.heightPixels / 3) {
-            p.x = g[0]; p.y = g[1]; p.width = g[2]; p.height = g[3]
-        } else {
-            p.x = 0; p.y = 0
-            p.width = WindowManager.LayoutParams.MATCH_PARENT
-            p.height = WindowManager.LayoutParams.MATCH_PARENT
+        if (!keepGeometry) {
+            val g = fullGeometry ?: intArrayOf(
+                0, 0,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+            )
+            // Belt-and-braces: a stale stored geometry can be a compact-sized
+            // rectangle (service killed while folded, then restored). Growing the
+            // window to a corner square is worse than useless, so never restore
+            // anything smaller than about a third of the screen.
+            val dm = context.resources.displayMetrics
+            if (g[2] >= dm.widthPixels / 3 && g[3] >= dm.heightPixels / 3) {
+                p.x = g[0]; p.y = g[1]; p.width = g[2]; p.height = g[3]
+            } else {
+                p.x = 0; p.y = 0
+                p.width = WindowManager.LayoutParams.MATCH_PARENT
+                p.height = WindowManager.LayoutParams.MATCH_PARENT
+            }
         }
         fullGeometry = null
         // The fill is [applyWindow]'s to set — it is the only place that knows
@@ -2246,22 +3105,25 @@ class FloatingWindowUi(
         // status bar sitting on a band of the user's wallpaper. Measured, not
         // assumed: with the flag the window's top is the display's top and
         // [winYOrigin] measures 0 by itself.
+        // Always not-focusable. Making the expanded card focusable did not
+        // receive HyperOS gesture-back (focus stayed on the app behind the
+        // overlay) and it kept the typing activity from owning the IME.
+        // Back is caught by the accessibility service and by [CardBackActivity].
         val base = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-        // Untouchable while a typing field is up, even though the window no
-        // longer overlaps it: the field's top edge is *derived* from the
-        // keyboard's height, which changes as the IME animates and as 搜狗's
-        // toolbar row comes and goes. Being a few pixels late would put this
-        // window over the top row of the field and eat the taps aimed at it —
-        // and the card has nothing to offer during a typing session anyway.
-        p.flags = if (gesturePassthrough || typingTop > 0) {
+        // Untouchable while a typing field is up. On HyperOS that flag does
+        // not by itself pass touches through the rectangle — [shrinkForField]
+        // is what actually uncovers the EditText — but a late inset must not
+        // put this window over the top row of the field either.
+        val yieldToField = !compact && (typingSession || typingTop > 0)
+        p.flags = if (gesturePassthrough || yieldToField || dismissing) {
             base or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         } else {
             base
         }
         // Blur behind only while the card is actually a card. Folded, the
-        // window is a 168 dp square around the ball and blurring behind *that*
+        // window is the ball's own square and blurring behind *that*
         // is a smudge following the ball around; hidden for a capture, the
         // window is at alpha 0 but the compositor would still be asked to
         // defocus what is behind it — and what is behind it is exactly the
@@ -2273,7 +3135,7 @@ class FloatingWindowUi(
         // full screen of pixels nobody can see. Turning it off here is also what
         // makes the card look the same on a device where cross-window blur is
         // unavailable, which is most of them.
-        val wantFrost = !compact && !captureHidden && !away && !backdropUp()
+        val wantFrost = !compact && !morphing && !captureHidden && !away && !backdropUp()
         frosted = Glass.frost(context, wm, p, want = wantFrost)
         paintCard()
         // The card now runs under the status bar ([FLAG_LAYOUT_IN_SCREEN]), so
@@ -2281,6 +3143,98 @@ class FloatingWindowUi(
         // the battery icon sit on top of `◈` and `✕`, and those are the two
         // controls the user cannot do without.
         insetTopBar()
+        // After the flags, before the layout. Folded and typing keep the
+        // rectangle their own code just set; the expanded card must not.
+        // A morph frame must not be overwritten here — that snap is the cut
+        // this animation exists to remove, and frost on every frame is the hitch.
+        applyExpandedFrame()
+        applyMotionChrome()
+        runCatching { wm.updateViewLayout(v, p) }
+    }
+
+    /**
+     * Stop the expanded card above the system gesture / navigation strip.
+     *
+     * `TYPE_APPLICATION_OVERLAY` (2038) is above the navigation bar (2019).
+     * `MATCH_PARENT` plus [WindowManager.LayoutParams.fitInsetsTypes] `0`
+     * therefore receives every touch in the home-gesture zone and on the
+     * 3-button bar, and HyperOS never starts the gesture. `FLAG_NOT_TOUCHABLE`
+     * does not give those pixels back on this ROM — the window has to end.
+     *
+     * Sides stay covered. An edge swipe is classified by [NavGesture] and folds
+     * the card; handing it to the system would Back the app behind the overlay
+     * and the card would still be sitting there. Main thread only.
+     */
+    private fun applyExpandedFrame() {
+        if (compact || morphing || typingSession || typingTop > 0) return
+        val p = params ?: return
+        val b = wm.currentWindowMetrics.bounds
+        val bottom = systemNavClearancePx()
+        val w = b.width()
+        val h = (b.height() - bottom - navTrimExtra).coerceAtLeast(dp(200))
+        val changed = p.x != 0 || p.y != 0 || p.width != w || p.height != h
+        if (changed) {
+            p.gravity = Gravity.TOP or Gravity.START
+            p.x = 0
+            p.y = 0
+            p.width = w
+            p.height = h
+            if (!navClearanceLogged) {
+                navClearanceLogged = true
+                android.util.Log.i(
+                    "Body",
+                    "nav: expanded window ${w}x$h leaves ${bottom}px for system home/back",
+                )
+            }
+        }
+        // A MATCH_PARENT frame on some ROMs starts at the status bar, so a
+        // height of screen-minus-clearance still covers the gesture strip.
+        // One check after layout, and only a real shortfall changes anything.
+        if (!navTrimPosted) {
+            navTrimPosted = true
+            ui.post {
+                navTrimPosted = false
+                trimIfCoveringNav()
+            }
+        }
+    }
+
+    private fun systemNavClearancePx(): Int {
+        val insets = wm.currentWindowMetrics.windowInsets
+        val gesture = insets.getInsetsIgnoringVisibility(WindowInsets.Type.systemGestures()).bottom
+        val nav = insets.getInsetsIgnoringVisibility(WindowInsets.Type.navigationBars()).bottom
+        // Floor, not a guess about one phone. A reported 0 — common for an
+        // overlay that opted out of fitInsets — would leave the strip covered,
+        // which is the whole bug. 48dp clears a 3-button bar and the K90's
+        // home gesture (144 px at density 480).
+        return maxOf(gesture, nav, dp(48))
+    }
+
+    private fun backEdgePx(): Int {
+        val insets = wm.currentWindowMetrics.windowInsets
+            .getInsetsIgnoringVisibility(WindowInsets.Type.systemGestures())
+        return maxOf(insets.left, insets.right, dp(32)).coerceAtMost(dp(48))
+    }
+
+    /** Main thread. Shorten once if the laid-out frame still reaches the gesture strip. */
+    private fun trimIfCoveringNav() {
+        if (compact || morphing || typingSession || typingTop > 0) return
+        val v = root ?: return
+        val p = params ?: return
+        if (!v.isLaidOut || p.height <= 0) return
+        val loc = IntArray(2)
+        v.getLocationOnScreen(loc)
+        val screenH = wm.currentWindowMetrics.bounds.height()
+        val gap = screenH - (loc[1] + v.height)
+        val want = systemNavClearancePx()
+        if (gap >= want - dp(4)) return
+        val extra = want - gap
+        // A nonsense reading (window not actually the card yet) must not
+        // collapse the card. A third of the screen is already past any bar.
+        if (extra <= 0 || extra > screenH / 3 || navTrimExtra + extra > screenH / 3) return
+        navTrimExtra += extra
+        p.height = (p.height - extra).coerceAtLeast(dp(200))
+        android.util.Log.i("Body", "nav: frame still covered the gesture strip (gap ${gap}px), height → ${p.height}")
         runCatching { wm.updateViewLayout(v, p) }
     }
 
@@ -2326,6 +3280,13 @@ class FloatingWindowUi(
     private fun paintCard() {
         val v = root ?: return
         val bg = backdrop
+        if (morphing) {
+            // The growing shape has to be opaque from the first frame. A
+            // transparent rect reads as the ball vanishing into whatever is
+            // behind it. This is the card's own solid, not a new colour.
+            v.setBackgroundColor(Color.parseColor(Glass.CARD_SOLID))
+            return
+        }
         if (compact) {
             v.background = null
             clearScrim(bg)
@@ -2797,16 +3758,12 @@ class FloatingWindowUi(
          */
         override fun onSizeChanged(w: Int, h: Int, oldW: Int, oldH: Int) {
             super.onSizeChanged(w, h, oldW, oldH)
-            if (compact || h <= 0) return
+            if (compact || morphing || h <= 0) return
             // Posted, not immediate: this runs inside the layout pass, and a
             // child's requestLayout from there is swallowed — the ball area
             // stayed MATCH_PARENT and the ball sat in the middle of the card
             // instead of the middle of its own area.
-            // Posted, not immediate: this runs inside the layout pass, and a
-            // child's requestLayout from there is swallowed — the ball area
-            // stayed MATCH_PARENT and the ball sat in the middle of the card
-            // instead of the middle of its own area.
-            post { if (!compact) refitCardAreas() }
+            post { if (!compact && !morphing) refitCardAreas() }
         }
 
         private val slop = ViewConfiguration.get(ctx).scaledTouchSlop
@@ -2863,6 +3820,8 @@ class FloatingWindowUi(
         private var startY = 0f
         private var startParamsX = 0
         private var startParamsY = 0
+        private var startLogicalX = 0
+        private var startLogicalY = 0
         private var tracking = false
         private var moved = false
         private var longPressed = false
@@ -2885,6 +3844,66 @@ class FloatingWindowUi(
          * never drags the window either — see the move branch.
          */
         private var swiping = false
+
+        /** Finger down in the back edge or the home band. Ignores a child's disallow so the swipe can still be read. */
+        private var navFromBand = false
+        private var navDownX = 0f
+        private var navDownY = 0f
+        private var navKind: NavGesture.Kind? = null
+
+        private fun navAllowed(): Boolean =
+            !compact && !morphing && !typingSession && typingTop == 0 && !away && listeners.wantsNavGesture()
+
+        private fun inNavBand(x: Float, y: Float): Boolean {
+            val edge = backEdgePx()
+            val band = dp(36)
+            return x <= edge || x >= width - edge || y >= height - band
+        }
+
+        override fun requestDisallowInterceptTouchEvent(disallowIntercept: Boolean) {
+            // A scroll that starts on the edge calls this after a few pixels.
+            // Honouring it is how an edge-back never reaches the threshold.
+            if (navFromBand) return
+            super.requestDisallowInterceptTouchEvent(disallowIntercept)
+        }
+
+        override fun onInterceptTouchEvent(e: MotionEvent): Boolean {
+            if (!navAllowed()) {
+                navFromBand = false
+                navKind = null
+                return false
+            }
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    navDownX = e.x
+                    navDownY = e.y
+                    navKind = null
+                    navFromBand = inNavBand(e.x, e.y)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (navFromBand && navKind == null) {
+                        val kind = NavGesture.classify(
+                            navDownX, navDownY, e.x, e.y, width, height,
+                            backEdgePx(), dp(36), dp(64),
+                        )
+                        if (kind != null) {
+                            navKind = kind
+                            return true
+                        }
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> navFromBand = false
+            }
+            return false
+        }
+
+        private fun dispatchNav(kind: NavGesture.Kind) {
+            when (kind) {
+                NavGesture.Kind.BACK -> listeners.onNavigateBack()
+                NavGesture.Kind.HOME -> listeners.onNavigateHome()
+            }
+        }
+
         private val longPressRunnable = Runnable {
             if (tracking && !moved) {
                 longPressed = true
@@ -2906,7 +3925,7 @@ class FloatingWindowUi(
             // room for) — it used to claim the whole window because a disc was
             // painted there, and without the disc that would be an invisible
             // square in the corner eating the user's taps.
-            val scale = if (compact) 1f else BALL_SCALE
+            val scale = if (compact) COMPACT_BALL_SCALE else BALL_SCALE
             val r = min(width, ballH) * 0.32f * scale
             val dx = x - cx
             val dy = y - cy
@@ -2914,6 +3933,15 @@ class FloatingWindowUi(
         }
 
         override fun onTouchEvent(e: MotionEvent): Boolean {
+            val pending = navKind
+            if (pending != null) {
+                if (e.actionMasked == MotionEvent.ACTION_UP) dispatchNav(pending)
+                if (e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) {
+                    navKind = null
+                    navFromBand = false
+                }
+                return true
+            }
             val p = params ?: return false
             val ballH = ballAreaView?.height ?: return false
             val areaTop = ballAreaView?.top ?: 0
@@ -2926,9 +3954,10 @@ class FloatingWindowUi(
                         if (e.y < areaTop) return false   // the pane's own touch
                         if (!isOnBall(e.x, e.y, ballH)) return false
                     } else if (compact) {
-                        // Bare folded ball: circle test only, the whole window
-                        // is the area.
-                        if (!isOnBall(e.x, e.y, ballH)) return false
+                        // The window is the ball's own square. Every point in
+                        // it is the ball — there is no transparent margin, and
+                        // returning false would not give those pixels to the
+                        // app underneath anyway.
                     } else {
                         // Full card: ignore anything below the ball area (the
                         // scrollback handles its own touches); then the circle.
@@ -2940,6 +3969,22 @@ class FloatingWindowUi(
                     slide?.cancel()
                     startX = e.rawX; startY = e.rawY
                     startParamsX = p.x; startParamsY = p.y
+                    if (compact && signboard == null && !morphing) {
+                        if (!gestureLayout) {
+                            logicalX = p.x
+                            logicalY = p.y
+                        } else {
+                            val extra = p.width - dp(COMPACT_DP)
+                            logicalX = p.x + extra / 2
+                            logicalY = p.y + extra / 2
+                        }
+                        gestureLayout = true
+                        startLogicalX = logicalX
+                        startLogicalY = logicalY
+                        draggingBall = false
+                        stopBreathing()
+                        animateGesture(MorphMotion.PRESS_SCALE, MorphMotion.PRESS_MS, spring = false)
+                    }
                     tracking = true
                     moved = false
                     swiping = false
@@ -2965,40 +4010,56 @@ class FloatingWindowUi(
                     // window off-screen — no clamp while it went, no magnet
                     // to bring it back.
                     if (moved && !swiping && compact) {
-                        p.x = startParamsX + (e.rawX - startX).toInt()
-                        // Y follows the finger even while gripping. The ledge
-                        // used to own Y outright, which kept the paws on their
-                        // line but also meant a ball that had clung — because a
-                        // task started, or because the user put it there — could
-                        // never be pulled back out.
-                        p.y = startParamsY + (e.rawY - startY).toInt()
-                        clampCompact(p)
-                        // Grab and let go on the way, not on release: the
-                        // paws are drawn on the ledge, so a ball being
-                        // lifted off it has to open its hands while the
-                        // finger is still moving, or it reads as gripping
-                        // thin air. Pose only — the geometry is the
-                        // finger's until ACTION_UP.
-                        val want = wantsPerch(p.y)
-                        if (want != perchApplied) {
-                            perchApplied = want
-                            // The hand that moved it is the authority on
-                            // where it sits, so this is also where the
-                            // user's own claim on the ledge is taken and
-                            // dropped — including over a running task's,
-                            // and over a page the brain is showing.
-                            perchedByUser = want
-                            if (!want) {
-                                perchedByTask = false
-                                perchedByPage = false
+                        if (gestureLayout) {
+                            // 1:1 with the finger. The window grows around the
+                            // logical 28 dp origin so the 1.06 lift is not clipped.
+                            if (!draggingBall) {
+                                draggingBall = true
+                                animateGesture(MorphMotion.DRAG_SCALE, MorphMotion.DRAG_LIFT_MS, spring = false)
                             }
-                            syncWorking()
+                            logicalX = startLogicalX + (e.rawX - startX).toInt()
+                            logicalY = startLogicalY + (e.rawY - startY).toInt()
+                            clampLogical()
+                            val want = wantsPerch(logicalY)
+                            if (want != perchApplied) {
+                                perchApplied = want
+                                perchedByUser = want
+                                if (!want) {
+                                    perchedByTask = false
+                                    perchedByPage = false
+                                }
+                                syncWorking()
+                            }
+                            if (!perchApplied) {
+                                homeX = logicalX
+                                homeY = logicalY
+                            }
+                            layoutGesture(gestureScale)
+                        } else {
+                            p.x = startParamsX + (e.rawX - startX).toInt()
+                            // Y follows the finger even while gripping. The ledge
+                            // used to own Y outright, which kept the paws on their
+                            // line but also meant a ball that had clung — because a
+                            // task started, or because the user put it there — could
+                            // never be pulled back out.
+                            p.y = startParamsY + (e.rawY - startY).toInt()
+                            clampCompact(p)
+                            val want = wantsPerch(p.y)
+                            if (want != perchApplied) {
+                                perchApplied = want
+                                perchedByUser = want
+                                if (!want) {
+                                    perchedByTask = false
+                                    perchedByPage = false
+                                }
+                                syncWorking()
+                            }
+                            if (!perchApplied) {
+                                homeX = p.x
+                                homeY = p.y
+                            }
+                            runCatching { wm.updateViewLayout(this, p) }
                         }
-                        if (!perchApplied) {
-                            homeX = p.x
-                            homeY = p.y
-                        }
-                        runCatching { wm.updateViewLayout(this, p) }
                     }
                     return true
                 }
@@ -3015,7 +4076,13 @@ class FloatingWindowUi(
                     tracking = false
                     moved = false
                     swiping = false
-                    if (wasDrag) settleAfterDrag()
+                    if (wasDrag) {
+                        draggingBall = false
+                        settleAfterDrag()
+                        if (gestureLayout) animateGesture(1f, pendingSettleMs, spring = false)
+                    } else if (gestureLayout) {
+                        animateGesture(1f, MorphMotion.RELEASE_MS, spring = true)
+                    }
                     retimeStroll()
                     if (wasTap) registerTap()
                     // Right means forward, the way a stack of cards is dealt.
@@ -3032,7 +4099,13 @@ class FloatingWindowUi(
                     tracking = false
                     moved = false
                     swiping = false
-                    if (wasDrag) settleAfterDrag()
+                    if (wasDrag) {
+                        draggingBall = false
+                        settleAfterDrag()
+                        if (gestureLayout) animateGesture(1f, pendingSettleMs, spring = false)
+                    } else if (gestureLayout) {
+                        animateGesture(1f, MorphMotion.RELEASE_MS, spring = true)
+                    }
                     retimeStroll()
                     return true
                 }
@@ -3150,23 +4223,41 @@ class FloatingWindowUi(
         private const val BALL_NUDGE_DP = 26
 
         /**
-         * Floor for the card's height while a typing field is up — see
-         * [setTypingTop].
+         * Compact window side, dp. This square **is** the ball.
          *
-         * Reached only on a device whose keyboard eats most of the screen: the
-         * card is meant to keep its ball and some of its scrollback visible
-         * above the field, and a card clipped to nothing would be the "it
-         * vanished" behaviour this replaced.
+         * An overlay does not forward a touch that lands inside its frame, so
+         * a window larger than the sphere steals every tap in the transparent
+         * margin. [COMPACT_BALL_SCALE] fills this side with the sphere.
+         * 28 dp is 84 px at density 480 — a third of the 84 dp / 252 px window
+         * that was still too big on the Redmi K90.
+         *
+         * The morph spec's ~56 dp circle is the design reference for "starts
+         * round". This window is already that circle. Growing the idle frame
+         * to 56 dp would put a touch-eating margin back around the sphere, so
+         * the resting size stays 28 dp and the morph interpolates from here.
+         * Press and drag may grow the window only while the finger is down.
+         *
+         * 28 dp is under the 48 dp Material touch-target suggestion. The
+         * window is not grown to meet it. Touch slop
+         * ([ViewConfiguration.getScaledTouchSlop], about 8 dp) is how far a
+         * finger may move before a hold becomes a drag, not a minimum size,
+         * and the view that took ACTION_DOWN keeps the rest of the gesture
+         * even after the finger leaves the square. A larger invisible hit
+         * area would be a larger touch-blocking frame, which is the bug this
+         * size exists to avoid.
          */
-        private const val MIN_TYPING_CARD_DP = 240
+        private const val COMPACT_DP = 28
 
         /**
-         * Compact window side and its inset from the screen corner. The sphere
-         * is a fixed fraction of the surface's shorter side, so this is the
-         * only knob for how big the corner ball reads — the rendered ball is
-         * roughly two thirds of it, and the circular hit test tracks it too.
+         * View scale that makes the rendered sphere fill [COMPACT_DP].
+         *
+         * The renderer draws the sphere at [SPHERE_RADIUS_FRACTION] of the
+         * surface (diameter ~0.48 of the side). Scaling by the inverse fills
+         * the window. Anything that sticks out past the silhouette — horns,
+         * a wave — clips at the edge rather than inflating the frame.
          */
-        private const val COMPACT_DP = 136
+        private const val COMPACT_BALL_SCALE = 0.5f / SPHERE_RADIUS_FRACTION
+
         private const val COMPACT_MARGIN_DP = 16
 
         /** How long [parkForGesture] waits for the main-thread move to run. */
@@ -3176,17 +4267,14 @@ class FloatingWindowUi(
         private const val PARK_SETTLE_MS = 50L
 
         /**
-         * How much of the ball area's padding a held signboard's tail reaches
-         * into, as a fraction of the compact side. The sphere occupies ~64% of
-         * the area, centred, so the padding above the head is ~18% of the side.
+         * How far a held signboard's tail reaches into the ball, dp.
          *
-         * Calibrated on device, not by eye: 0.30 measured a 9px overlap with
-         * the head ("戳到脑袋"), 0.14 read as detached. Each 0.01 of the
-         * fraction is ~3.8px on the test phone, so 0.235 targets a ~14px
-         * clearance — the tail tip visibly *near* the head without touching,
-         * which is what "举着" reads as.
+         * The sphere fills the ball area, so the old fraction of the side
+         * (calibrated against a transparent pad above the head) would bury
+         * the tail in the face. A few dp is enough for the board to read as
+         * held rather than hovering.
          */
-        private const val SIGN_OVERLAP_FRACTION = 0.235f
+        private const val SIGN_OVERLAP_DP = 8
 
         private const val PERCH_SLIDE_MS = 240L
 

@@ -1,5 +1,6 @@
 package net.kuafuai.andee.brain
 
+import net.kuafuai.andee.config.BrainConfig
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -34,8 +35,14 @@ class LlmHttpException(val code: Int, val body: String) :
 }
 
 /**
- * One blocking call to an OpenAI-compatible `/chat/completions`, aimed at
- * DeepSeek.
+ * One blocking call to an OpenAI-compatible `/chat/completions`.
+ *
+ * DeepSeek is the original target. Xiaomi MiMo uses the same call with three
+ * differences, all of them on the wire rather than in the loop: the model and
+ * URL are fixed, the key travels as `api-key` as well as Bearer, and when
+ * thinking is on an assistant message that called a tool must be echoed with
+ * its `reasoning_content` or MiMo answers 400. DeepSeek rejects that field, so
+ * it is still stripped on the DeepSeek path.
  *
  * Deliberately thin and deliberately **not** streaming. Streaming would let TTS
  * start talking a second or two earlier, but it costs an SSE parser plus
@@ -47,9 +54,10 @@ class LlmHttpException(val code: Int, val body: String) :
  *  * **`tool_calls[].function.arguments` is a JSON *string*, not an object.**
  *    It has to be re-parsed, and a model that emits malformed JSON must not
  *    take the turn down — see [ToolCall.argumentsOrNull].
- *  * **`reasoning_content` must never be sent back.** DeepSeek rejects requests
- *    whose assistant messages carry it, so [Reply.reasoning] exists to be
- *    logged and thrown away, never to be appended to the history.
+ *  * **`reasoning_content` is not one rule.** DeepSeek rejects requests whose
+ *    assistant messages carry it, so on that path [Reply.reasoning] is logged
+ *    and dropped. MiMo, with thinking on, requires it back on any assistant
+ *    message that contains tool calls — see [assistantForHistory].
  *
  * Threading: [complete] blocks the calling thread. It is only ever called from
  * [LocalBrain]'s single loop thread.
@@ -60,6 +68,8 @@ class LlmClient(
     model: String,
     thinking: Boolean,
     reasoningEffort: String,
+    /** [BrainConfig.PROVIDER_DEEPSEEK] or [BrainConfig.PROVIDER_MIMO]. */
+    private val provider: String = BrainConfig.PROVIDER_DEEPSEEK,
 ) {
 
     // Request parameters, read once per [complete]. Volatile because [retune]
@@ -139,32 +149,33 @@ class LlmClient(
      * @param messages the full conversation, system message first.
      * @param tools OpenAI-format function specs — see [toolSpecs].
      * @param noThinking ask without reasoning whatever the user's setting is.
+     *   The log line from [requestLine] uses the same rule, so it names the
+     *   `thinking.type` that actually goes out.
      */
+    fun requestLine(noThinking: Boolean = false): String {
+        val type = if (thinking && !noThinking) "enabled" else "disabled"
+        return "llm request model=$model thinking.type=$type provider=$provider"
+    }
+
     fun complete(messages: List<JSONObject>, tools: JSONArray, noThinking: Boolean = false): Reply {
-        val msgArr = JSONArray()
-        for (m in messages) msgArr.put(m)
-        val body = JSONObject()
-            .put("model", model)
-            .put("messages", msgArr)
-            .put("stream", false)
-        if (tools.length() > 0) {
-            body.put("tools", tools).put("tool_choice", "auto")
-        }
-        if (thinking && !noThinking) {
-            body.put("thinking", JSONObject().put("type", "enabled"))
-            body.put("reasoning_effort", reasoningEffort)
-        } else {
-            body.put("thinking", JSONObject().put("type", "disabled"))
-        }
+        val thinkingOn = thinking && !noThinking
+        val body = chatBody(
+            model = model,
+            messages = messages,
+            tools = tools,
+            thinkingOn = thinkingOn,
+            reasoningEffort = reasoningEffort,
+            provider = provider,
+        )
 
         val req = Request.Builder()
             .url("$baseUrl/chat/completions")
-            .addHeader("Authorization", "Bearer $apiKey")
             .addHeader("Content-Type", "application/json")
-            .post(body.toString().toRequestBody(JSON))
-            .build()
+        authorize(req, provider, apiKey)
+        req.post(body.toString().toRequestBody(JSON))
+        val built = req.build()
 
-        val call = http.newCall(req)
+        val call = http.newCall(built)
         current = call
         val text = try {
             call.execute().use { resp ->
@@ -210,7 +221,7 @@ class LlmClient(
             content = msg.optString("content").orEmpty(),
             reasoning = msg.optString("reasoning_content").orEmpty(),
             toolCalls = calls,
-            assistantMessage = sanitizeAssistant(msg),
+            assistantMessage = assistantForHistory(msg, keepReasoning = thinkingOn && provider == BrainConfig.PROVIDER_MIMO),
             promptTokens = usage?.optInt("prompt_tokens") ?: 0,
             completionTokens = usage?.optInt("completion_tokens") ?: 0,
             // 命中缓存的 prompt 有多少。火山方舟（现在的上游）把它放在
@@ -238,21 +249,83 @@ class LlmClient(
         runCatching { c.cancel() }
     }
 
-    private fun sanitizeAssistant(msg: JSONObject): JSONObject {
-        val out = JSONObject()
-        out.put("role", "assistant")
-        // JSONObject.NULL rather than omitting the key: the API expects
-        // `content` to be present on an assistant message even when the whole
-        // turn was tool calls.
-        val content = msg.optString("content").orEmpty()
-        out.put("content", if (content.isEmpty()) JSONObject.NULL else content)
-        msg.optJSONArray("tool_calls")?.let { if (it.length() > 0) out.put("tool_calls", it) }
-        return out
-    }
-
     companion object {
-        private const val TAG = "Brain"
         private val JSON = "application/json; charset=utf-8".toMediaType()
+
+        /**
+         * The JSON body of one `/chat/completions` call.
+         *
+         * `thinking.type` is always written. MiMo's own default is thinking on,
+         * so leaving the field out would turn it on; DeepSeek already received
+         * the field either way. `reasoning_effort` is DeepSeek's knob and is
+         * not a MiMo parameter — MiMo only has enabled / disabled.
+         *
+         * MiMo with thinking on keeps `reasoning_content` on the messages it is
+         * handed. Every other call strips it, because DeepSeek rejects the field.
+         */
+        fun chatBody(
+            model: String,
+            messages: List<JSONObject>,
+            tools: JSONArray,
+            thinkingOn: Boolean,
+            reasoningEffort: String,
+            provider: String,
+        ): JSONObject {
+            val keepReasoning = thinkingOn && provider == BrainConfig.PROVIDER_MIMO
+            val msgArr = JSONArray()
+            for (m in messages) msgArr.put(wireMessage(m, keepReasoning))
+            val body = JSONObject()
+                .put("model", model)
+                .put("messages", msgArr)
+                .put("stream", false)
+            if (tools.length() > 0) {
+                body.put("tools", tools).put("tool_choice", "auto")
+            }
+            body.put("thinking", JSONObject().put("type", if (thinkingOn) "enabled" else "disabled"))
+            if (thinkingOn && provider != BrainConfig.PROVIDER_MIMO) {
+                body.put("reasoning_effort", reasoningEffort)
+            }
+            return body
+        }
+
+        /**
+         * Auth headers. DeepSeek stays `Authorization: Bearer`, as before.
+         * MiMo's docs show the OpenAI SDK, which sends Bearer, and also accept
+         * `api-key` — both go out, so either reading of the spec works.
+         */
+        fun authorize(builder: Request.Builder, provider: String, apiKey: String) {
+            if (provider == BrainConfig.PROVIDER_MIMO) {
+                builder.header("api-key", apiKey)
+            }
+            builder.header("Authorization", "Bearer $apiKey")
+        }
+
+        /**
+         * The assistant message to put back into the history.
+         *
+         * `content` is always present: the API wants the key even when the turn
+         * was only tool calls. `reasoning_content` is kept only for MiMo with
+         * thinking on — a later tool round without it is a 400.
+         */
+        fun assistantForHistory(msg: JSONObject, keepReasoning: Boolean): JSONObject {
+            val out = JSONObject()
+            out.put("role", "assistant")
+            val content = msg.optString("content").orEmpty()
+            out.put("content", if (content.isEmpty()) JSONObject.NULL else content)
+            msg.optJSONArray("tool_calls")?.let { if (it.length() > 0) out.put("tool_calls", it) }
+            if (keepReasoning) {
+                val reasoning = msg.optString("reasoning_content")
+                if (reasoning.isNotEmpty()) out.put("reasoning_content", reasoning)
+            }
+            return out
+        }
+
+        private fun wireMessage(m: JSONObject, keepReasoning: Boolean): JSONObject {
+            if (keepReasoning || !m.has("reasoning_content")) return m
+            val copy = JSONObject(m.toString())
+            copy.remove("reasoning_content")
+            return copy
+        }
 
         /**
          * Turn the body's own schema list into OpenAI function specs.

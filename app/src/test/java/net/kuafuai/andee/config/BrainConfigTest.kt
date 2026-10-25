@@ -34,5 +34,6 @@ class BrainConfigTest {
         assertFalse(base.sameBackend(base.copy(apiKey = "sk-two")))
         assertFalse(base.sameBackend(base.copy(baseUrl = "https://other.example.com/v1")))
         assertFalse(base.sameBackend(base.copy(mode = VoiceConfig.BRAIN_HUB)))
+        assertFalse(base.sameBackend(base.copy(provider = BrainConfig.PROVIDER_MIMO)))
     }
 }

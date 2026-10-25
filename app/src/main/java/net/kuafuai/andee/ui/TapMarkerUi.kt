@@ -49,6 +49,12 @@ import kotlin.math.max
  * the coordinate it is sitting on — see [setVisibleForGesture], called from
  * the same passthrough dance as the glow.
  *
+ * An idle box must not stay in the window list. Alpha 0 is not passthrough:
+ * on HyperOS a 144dp marker left attached at alpha 0 (432×432 at density 3)
+ * still ate the touches under it. The window is added when a mark is actually
+ * showing and removed when it expires, when a gesture needs that point, or
+ * when the ball is hidden — see [syncPresence].
+ *
  * ## Why it is NOT hidden for screenshots
  *
  * [FloatingWindowUi] and [EdgeRippleUi] both blank themselves during a display
@@ -68,10 +74,14 @@ class TapMarkerUi(private val context: Context) {
 
     private var view: MarkView? = null
     private var params: WindowManager.LayoutParams? = null
+    private var attached = false
 
-    /** Main thread only, folded into the window alpha by [applyWindow]. */
+    /** Main thread only, folded into whether the window exists by [syncPresence]. */
     private var gestureHidden = false
     private var showing = false
+
+    /** [hide] until the next [show]. A mark posted across that gap must not add a window. */
+    private var closed = false
 
     private val density = context.resources.displayMetrics.density
     private val box = (BOX_DP * density).toInt()
@@ -92,9 +102,20 @@ class TapMarkerUi(private val context: Context) {
     fun lastMarkAgeMs(): Long? =
         if (lastMark == null) null else SystemClock.uptimeMillis() - lastMarkAt
 
+    /**
+     * Nothing to put on screen yet. The window is created on the first mark.
+     * Kept so startup and [net.kuafuai.andee.BodyCoreService.ensureOverlays]
+     * can keep calling it.
+     */
     fun show(): Boolean {
+        closed = false
+        return true
+    }
+
+    /** Build the view the first time a mark wants it. Does not add a window. */
+    private fun ensureView(): Boolean {
         if (view != null) return true
-        val v = MarkView(context) { onIdle() }
+        val v = MarkView(context) { onIdle(it) }
         val p = WindowManager.LayoutParams(
             box, box,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -108,7 +129,7 @@ class TapMarkerUi(private val context: Context) {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = 0; y = 0
-            alpha = 0f
+            alpha = 1f
             // p.x/p.y are display pixels (the gesture's own), so the window must not
             // be offset by the system bars: by default an API 30+ window fits them,
             // and the mark was drawn a status bar's height below the real tap.
@@ -116,21 +137,38 @@ class TapMarkerUi(private val context: Context) {
             layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
         }
-        return try {
-            v.hideFromAccessibility()
+        v.hideFromAccessibility()
+        view = v
+        params = p
+        return true
+    }
+
+    private fun attach() {
+        val v = view ?: return
+        val p = params ?: return
+        if (attached) return
+        p.alpha = 1f
+        try {
             wm.addView(v, p)
-            view = v
-            params = p
-            true
+            attached = true
+            v.invalidate()
         } catch (t: Throwable) {
             android.util.Log.e("Body", "tap marker addView failed", t)
-            false
         }
     }
 
-    fun hide() {
+    private fun detach() {
         val v = view ?: return
+        if (!attached) return
         runCatching { wm.removeView(v) }
+        attached = false
+    }
+
+    fun hide() {
+        closed = true
+        showing = false
+        gestureHidden = false
+        detach()
         view = null
         params = null
     }
@@ -147,11 +185,13 @@ class TapMarkerUi(private val context: Context) {
         lastMark = intArrayOf(x, y)
         lastMarkAt = SystemClock.uptimeMillis()
         ui.post {
+            if (closed) return@post
+            if (!ensureView()) return@post
             val v = view ?: return@post
             val p = params ?: return@post
             p.x = x - box / 2
             p.y = y - box / 2
-            runCatching { wm.updateViewLayout(v, p) }
+            if (attached) runCatching { wm.updateViewLayout(v, p) }
             // The label is the 0-1000 coordinate rather than the pixel one: that
             // is the only space the brain writes in, and the one that survives a
             // downscaled screenshot.
@@ -160,7 +200,7 @@ class TapMarkerUi(private val context: Context) {
             val ny = y * NORM_MAX / max(1, d.y)
             v.mark(kind.label, "$nx,$ny")
             showing = true
-            applyWindow()
+            syncPresence()
         }
     }
 
@@ -170,7 +210,7 @@ class TapMarkerUi(private val context: Context) {
      * one, and the platform drops the touch without reporting anything.
      */
     fun setVisibleForGesture(visible: Boolean) {
-        ui.post { gestureHidden = !visible; applyWindow() }
+        ui.post { gestureHidden = !visible; syncPresence() }
     }
 
     /**
@@ -189,24 +229,28 @@ class TapMarkerUi(private val context: Context) {
     fun revealNow() {
         ui.post {
             gestureHidden = false
-            applyWindow()
+            syncPresence()
         }
     }
 
-    /** Main thread only. */
-    private fun onIdle() {
+    /** Main thread only. A callback from a view [hide] already dropped is ignored. */
+    private fun onIdle(from: MarkView) {
+        if (view !== from) return
         showing = false
-        applyWindow()
+        detach()
     }
 
-    /** Main thread only. Opacity is billed per window, not per pixel. */
-    private fun applyWindow() {
-        val v = view ?: return
-        val p = params ?: return
-        val want = if (showing && !gestureHidden) 1f else 0f
-        if (p.alpha == want) return
-        p.alpha = want
-        runCatching { wm.updateViewLayout(v, p) }
+    /**
+     * Put the window up only while a mark is allowed to be seen.
+     * Main thread only. An alpha-0 box is what was blocking the screen under it.
+     */
+    private fun syncPresence() {
+        if (closed || !showing || gestureHidden) {
+            detach()
+            return
+        }
+        if (!ensureView()) return
+        attach()
     }
 
     /**
@@ -224,7 +268,7 @@ class TapMarkerUi(private val context: Context) {
      */
     private class MarkView(
         context: Context,
-        private val onIdle: () -> Unit,
+        private val onIdle: (MarkView) -> Unit,
     ) : View(context) {
 
         private val d = context.resources.displayMetrics.density
@@ -280,7 +324,7 @@ class TapMarkerUi(private val context: Context) {
                 running = false
                 // Posted, not called: the listener touches window layout, which
                 // has no business happening inside a draw pass.
-                post(onIdle)
+                post { onIdle(this) }
                 return
             }
 

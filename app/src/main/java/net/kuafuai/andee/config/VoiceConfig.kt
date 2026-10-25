@@ -398,10 +398,29 @@ object VoiceConfig {
                     baseUrl = codeFlyingLlmBaseUrl(),
                     model = p.getString("llm_model", DEFAULT_LLM_MODEL)
                         .orEmpty().trim().ifEmpty { DEFAULT_LLM_MODEL },
-                    thinking = p.getString("llm_thinking", defaultThinking())
-                        ?.trim()?.lowercase() != "disabled",
+                    thinking = net.kuafuai.andee.config.BrainConfig.deepseekThinkingOn(
+                        p.getString("llm_thinking", null),
+                        defaultThinking(),
+                    ),
                     reasoningEffort = p.getString("llm_reasoning_effort", DEFAULT_REASONING_EFFORT)
                         .orEmpty().trim().ifEmpty { DEFAULT_REASONING_EFFORT },
+                )
+            }
+            val provider = net.kuafuai.andee.config.BrainConfig.normalizeProvider(
+                p.getString("llm_provider", null),
+            )
+            if (provider == net.kuafuai.andee.config.BrainConfig.PROVIDER_MIMO) {
+                return BrainConfig(
+                    mode = mode,
+                    apiKey = p.getString("mimo_api_key", "").orEmpty().trim(),
+                    baseUrl = net.kuafuai.andee.config.BrainConfig.MIMO_BASE_URL,
+                    model = net.kuafuai.andee.config.BrainConfig.MIMO_MODEL,
+                    // Unset is off. MiMo's own default is on, and this must not inherit it.
+                    thinking = net.kuafuai.andee.config.BrainConfig.mimoThinkingOn(
+                        p.getString("mimo_thinking", null),
+                    ),
+                    reasoningEffort = DEFAULT_REASONING_EFFORT,
+                    provider = net.kuafuai.andee.config.BrainConfig.PROVIDER_MIMO,
                 )
             }
             // Language-dependent defaults: the blank-row fallback must be the
@@ -419,10 +438,13 @@ object VoiceConfig {
                     .orEmpty().trim().trimEnd('/').ifEmpty { defaultBaseUrl },
                 model = p.getString("llm_model", defaultModel)
                     .orEmpty().trim().ifEmpty { defaultModel },
-                thinking = p.getString("llm_thinking", defaultThinking())
-                    ?.trim()?.lowercase() != "disabled",
+                thinking = net.kuafuai.andee.config.BrainConfig.deepseekThinkingOn(
+                    p.getString("llm_thinking", null),
+                    defaultThinking(),
+                ),
                 reasoningEffort = p.getString("llm_reasoning_effort", DEFAULT_REASONING_EFFORT)
                     .orEmpty().trim().ifEmpty { DEFAULT_REASONING_EFFORT },
+                provider = net.kuafuai.andee.config.BrainConfig.PROVIDER_DEEPSEEK,
             )
         }
 
@@ -691,11 +713,27 @@ object VoiceConfig {
                 "llm_api_key" to p.getString("llm_api_key", "").orEmpty(),
                 "llm_base_url" to p.getString("llm_base_url", "").orEmpty(),
                 "llm_model" to p.getString("llm_model", "").orEmpty(),
-                // Round-tripped as the wire words rather than a boolean: this map
-                // feeds SettingsUi's pickers and the picker's value is what comes
-                // back to [save], which only speaks String.
-                "llm_thinking" to if (bc.thinking) "enabled" else "disabled",
-                "llm_reasoning_effort" to bc.reasoningEffort,
+                // The provider chip. Unset reads as DeepSeek, so an install from
+                // before MiMo existed opens on the row it already had.
+                "llm_provider" to net.kuafuai.andee.config.BrainConfig.normalizeProvider(
+                    p.getString("llm_provider", null),
+                ),
+                // Each provider's thinking is its own pref. Reading them off
+                // [bc] would paint the hidden row with the other provider's
+                // switch. DeepSeek's unset case is still the build default;
+                // MiMo's unset case is off.
+                "llm_thinking" to if (
+                    net.kuafuai.andee.config.BrainConfig.deepseekThinkingOn(
+                        p.getString("llm_thinking", null),
+                        defaultThinking(),
+                    )
+                ) "enabled" else "disabled",
+                "llm_reasoning_effort" to p.getString("llm_reasoning_effort", DEFAULT_REASONING_EFFORT)
+                    .orEmpty().ifEmpty { DEFAULT_REASONING_EFFORT },
+                "mimo_api_key" to p.getString("mimo_api_key", "").orEmpty(),
+                "mimo_thinking" to if (
+                    net.kuafuai.andee.config.BrainConfig.mimoThinkingOn(p.getString("mimo_thinking", null))
+                ) "enabled" else "disabled",
                 "grounding" to p.getString("grounding", "off")!!,
                 "notify" to notifyScope(context),
                 "lang" to uiLanguage(context),
@@ -923,7 +961,8 @@ object VoiceConfig {
             "brain",
             "show_hub",
             "llm_api_key", "llm_base_url", "llm_model",
-            "llm_thinking", "llm_reasoning_effort",
+            "llm_provider", "llm_thinking", "llm_reasoning_effort",
+            "mimo_api_key", "mimo_thinking",
             "grounding",
             "notify",
             "lang",

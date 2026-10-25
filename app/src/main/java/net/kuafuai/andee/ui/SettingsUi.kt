@@ -647,42 +647,59 @@ class SettingsUi(
         }
         note(cfBlock, lctx.getString(cfNoteKey))
 
-        // ---- 本机 tab: LLM + 火山 voice rows ----
+        // ---- 本机 tab: which model, then that model's rows, then voice ----
         val localBlock = block(panel)
+        rowLabel(localBlock, lctx.getString(R.string.settings_llm_provider))
+        var applyLlm: ((String, Boolean) -> Unit)? = null
+        val llmProvider = segmented(
+            localBlock,
+            "llm_provider",
+            listOf(
+                // DeepSeek first: it is the row an unset install already runs,
+                // and the leftmost option is the fallback.
+                net.kuafuai.andee.config.BrainConfig.PROVIDER_DEEPSEEK to
+                    lctx.getString(R.string.settings_llm_provider_deepseek),
+                net.kuafuai.andee.config.BrainConfig.PROVIDER_MIMO to
+                    lctx.getString(R.string.settings_llm_provider_mimo),
+            ),
+        ) { applyLlm?.invoke(it, true) }
+
+        // DeepSeek (and any OpenAI-compatible URL the user already typed).
         // The hint *is* the value a blank row resolves to, so the hint and the
         // resolved config come from the same language-aware pair — see
         // [VoiceConfig.llmModelDefault]. An English card advertises an OpenAI
         // model / base URL and, if the user never saves one, actually calls it;
         // a Chinese card stays on DeepSeek.
+        val deepseekBlock = block(localBlock)
         field(
-            localBlock,
+            deepseekBlock,
             "llm_api_key",
             lctx.getString(R.string.settings_llm_api_key),
             hint = "sk-…",
             secret = true,
         )
         field(
-            localBlock,
+            deepseekBlock,
             "llm_model",
             lctx.getString(R.string.settings_llm_model),
             hint = VoiceConfig.llmModelDefault(context),
         )
         field(
-            localBlock,
+            deepseekBlock,
             "llm_base_url",
             lctx.getString(R.string.settings_llm_base_url),
             hint = VoiceConfig.llmBaseUrlDefault(context),
         )
 
-        rowLabel(localBlock, lctx.getString(R.string.settings_llm_thinking))
+        rowLabel(deepseekBlock, lctx.getString(R.string.settings_llm_thinking))
         var applyThinking: ((String, Boolean) -> Unit)? = null
         val thinking = segmented(
-            localBlock,
+            deepseekBlock,
             "llm_thinking",
             listOf("enabled" to lctx.getString(R.string.common_on), "disabled" to lctx.getString(R.string.common_off)),
         ) { applyThinking?.invoke(it, true) }
 
-        val effortBlock = block(localBlock)
+        val effortBlock = block(deepseekBlock)
         rowLabel(effortBlock, lctx.getString(R.string.settings_llm_effort))
         segmented(
             effortBlock,
@@ -693,6 +710,30 @@ class SettingsUi(
                 "low" to lctx.getString(R.string.common_low),
             ),
         )
+
+        // MiMo. Model and URL are not fields: they are the official Flash
+        // endpoint. The key is its own pref, so switching back to DeepSeek
+        // restores the DeepSeek key that was already there. Thinking's first
+        // option is off — MiMo's own default is on, and a new config must not
+        // inherit that.
+        val mimoBlock = block(localBlock)
+        field(
+            mimoBlock,
+            "mimo_api_key",
+            lctx.getString(R.string.settings_mimo_api_key),
+            hint = lctx.getString(R.string.settings_mimo_api_key_hint),
+            secret = true,
+        )
+        rowLabel(mimoBlock, lctx.getString(R.string.settings_llm_thinking))
+        segmented(
+            mimoBlock,
+            "mimo_thinking",
+            listOf(
+                "disabled" to lctx.getString(R.string.settings_llm_thinking_off),
+                "enabled" to lctx.getString(R.string.settings_llm_thinking_on),
+            ),
+        )
+        note(mimoBlock, lctx.getString(R.string.settings_mimo_note))
         note(localBlock, lctx.getString(R.string.settings_brain_local_note))
 
         // ---- Which service hears and speaks ----
@@ -854,6 +895,12 @@ class SettingsUi(
             Glass.setVisible(effortBlock, th != "disabled", animate)
         }
         applyThinking(thinking, false)
+        applyLlm = { p, animate ->
+            val mimo = p == net.kuafuai.andee.config.BrainConfig.PROVIDER_MIMO
+            Glass.setVisible(deepseekBlock, !mimo, animate)
+            Glass.setVisible(mimoBlock, mimo, animate)
+        }
+        applyLlm(llmProvider, false)
     }
 
     /**

@@ -4,7 +4,7 @@ Notable changes to Andee. The format follows [Keep a Changelog](https://keepacha
 
 ## Versioning policy
 
-- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`12` / `"0.5.3"`**.
+- `versionCode` / `versionName` live in `app/build.gradle` and are currently **`20` / `"0.5.11"`**.
 - Releases are tagged `vMAJOR.MINOR.PATCH`, `versionName` mirrors the tag without the leading `v`,
   and `versionCode` increases by one per release. `versionCode` must increase **monotonically** or
   Android refuses the upgrade; the same number must never be reused for two different builds.
@@ -27,6 +27,77 @@ anything not built at a tag, identify it by the short commit hash it was built f
 hash into `versionName` at build time would close this hole; it is not implemented yet.)
 
 ## [Unreleased]
+
+## [0.5.11] - 2026-10-25
+
+The ball and the card are one window. Opening it no longer cuts from a ball to a card.
+
+### Changed
+
+- **Morph, same container.** Expand 360 ms (`cubic-bezier(0.2, 0.9, 0.25, 1)`), collapse 280 ms (`cubic-bezier(0.4, 0, 0.2, 1)`). Width, height and corner radius interpolate together. Chat content stays out until 40%, then fades and rises 8 dp. The sphere fades and turns over 180 ms. Resting size stays 28 dp — the idle window is already the circle, and 56 dp would eat taps around it. Press scales to 0.92 (80 ms) and springs back through 1.03 (220 ms). Drag lifts to 1.06 and a heavier shadow, 1:1 with the finger. A release inside 28% of the left or right edge snaps there in 320 ms and stays above the gesture strip; the ledge cling is unchanged. Showing the ball scales 0.6→1 (280 ms); hiding it scales 1→0.7 and fades (200 ms). Colours are untouched. The 0.5.10 nav clearance is the expanded end rect. Half-hide is not in this build.
+
+## [0.5.10] - 2026-10-25
+
+On a Redmi K90 with the card open, system Back and the swipe up to the launcher did nothing. The folded ball, typing, and step-aside are unchanged.
+
+### Fixed
+
+- **Back folds the card, and Home reaches the launcher.** The expanded window stops above the navigation / home-gesture strip (`TYPE_APPLICATION_OVERLAY` sits on top of that strip, and `FLAG_NOT_TOUCHABLE` does not let the touch through on HyperOS). A back-swipe that still starts on the card folds it the same way ✕ does. The accessibility key filter stays off — turning it on was stopping HyperOS from generating those gestures at all. A Home that lands on the launcher folds the card and does not pull the back-catcher activity back over the desktop. A real Back key (3-button, `adb input keyevent 4`) still folds via `CardBackActivity`. The folded ball, the typing field, and the settings sheet do not take that path.
+
+## [0.5.9] - 2026-10-25
+
+The local brain can use Xiaomi MiMo as well as DeepSeek. DeepSeek's settings, key and request stay as they were. The folded ball, Back, typing and step-aside are unchanged.
+
+### Added
+
+- **MiMo V2.6 Flash, beside DeepSeek.** On the local-brain tab, 模型服务 switches between them. DeepSeek keeps its key, model, URL, thinking switch and effort. MiMo is fixed to `mimo-v2.6-flash` at `https://api.xiaomimimo.com/v1`, stores its key as `mimo_api_key` (not in the repo), and has its own 关思考 / 开思考 switch. A new MiMo config sends `"thinking": {"type": "disabled"}`. MiMo's own default is thinking on, so the field is written either way; turning the switch on sends `enabled` and does not send `reasoning_effort`. With thinking on, a tool-call turn is echoed with `reasoning_content`, which that API requires. The request log (tag `Brain`) is `llm request model=… thinking.type=… provider=…`.
+
+## [0.5.8] - 2026-10-25
+
+Typing and the ball-to-card switch were hitching. The card still folds on Back, the folded ball is still 28 dp, and step-aside is unchanged.
+
+### Fixed
+
+- **Typing no longer resizes the overlay on every key or candidate-bar twitch.** While the field is up, the accessibility service does not filter keys (that path delivers every IME commit to the main thread before the editor). The overlay still starts short of the field, and it still shrinks if a later inset would cover the EditText, but a jitter that leaves the field clear does not call `updateViewLayout`, and it does not frost or repaint the card. The keyboard dropping to 0 for a moment no longer grows the card back over the field; the height comes back once, when the field is gone.
+- **Opening and closing the card no longer starts and destroys an activity on that same frame.** The back catcher is parked with `moveTaskToBack` instead of `finish`, and the next unfold reorders it after the overlay has resized. Window-state bursts no longer call `startActivity` on the event itself. Hiding the ball and stopping the service still finish that activity.
+
+## [0.5.7] - 2026-10-24
+
+System Back on the expanded card folds it, on a device where the overlay never receives the gesture. Double-tap typing can take Chinese again. Folded size and step-aside are unchanged.
+
+### Fixed
+
+- **Back folds the card on HyperOS.** Clearing `FLAG_NOT_FOCUSABLE` on the overlay did not: focus stayed on the app behind it, so the key and the gesture never arrived. The overlay is not-focusable again. While the card is expanded, `ScreenBodyService.onKeyEvent` consumes `KEYCODE_BACK` before that app, and `CardBackActivity` is the focused window the gesture actually targets. Both call the same `compactForUser` path as ✕. They do not stop the service. A folded ball, the typing field, and the settings/vault cards do not take Back.
+- **Double-tap typing no longer covers the field.** The overlay is pulled above the input — and marked not-touchable — before `TextInputActivity` starts. Its height is the field's screen top minus the overlay frame's real top, so a `MATCH_PARENT` window that starts under the status bar does not extend into the EditText or the candidate row. `IME_FLAG_NO_EXTRACT_UI` keeps a Chinese IME from swapping in a fullscreen extract editor.
+
+## [0.5.6] - 2026-10-24
+
+System Back on the expanded card folds it to the corner ball. The service stays up. Folded size and step-aside are unchanged.
+
+### Fixed
+
+- **Back folds the card.** While the card is open, the system Back key and the back gesture do the same thing as the top-right ✕: `onMinimizeClick` → `compactForUser` → `setCompact(true)`. They do not stop the service or accessibility. The expanded card drops `FLAG_NOT_FOCUSABLE`, takes focus, and consumes Back (`KEYCODE_BACK` on the overlay root, plus an `OnBackInvokedCallback` on API 33+). The compact ball stays not-focusable. `COMPACT_DP` is still 28, and 先躲开 / 回来 is unchanged.
+
+## [0.5.5] - 2026-10-24
+
+The folded ball from 0.5.4 was still too big on the Redmi K90. It is a third of that size. Stepping aside from the notification is unchanged.
+
+### Fixed
+
+- **Folded ball is 28 dp.** `COMPACT_DP` was 84 (252 px at density 480) and is now 28 (84 px at the same density). The window is still the sphere's own square: blur stays off, and there is still no idle fullscreen overlay. 28 dp is under the 48 dp touch-target suggestion. The window is not padded out to meet it, because that padding would eat taps under the ball. Touch slop is only the distance a finger may move before a hold becomes a drag (~8 dp); the finger that lands on the square keeps the gesture, so the ball stays tappable and draggable.
+
+## [0.5.4] - 2026-10-24
+
+The corner ball was a window big enough to cover a chat, and two more windows sat on the screen at alpha 0 doing the same thing. This makes the folded ball the size of the ball, and gives a way to take it off the screen without stopping the assistant.
+
+### Added
+
+- **Step aside, from the foreground notification.** While the ball is up the row has **先躲开 / Step aside**. That hides the overlays and leaves the service, the microphone and accessibility running — it is not the voice exit, which still stops the body. While it is hidden the row says so, and tapping the notification (or **回来 / Come back**) puts the **compact** ball back. The launcher icon is the other way back, and that one opens the card. Hide is not saved: a process restart comes back with the ball showing. A meeting that is still recording says so in the shade, because the triple-tap that ends it needs the ball.
+
+### Fixed
+
+- **Folded, the window is the ball.** `COMPACT_DP` is 84 (252 px at density 480, the Redmi K90 Pro Max). The rendered sphere fills that square; horns that stick out clip at the edge rather than growing the window. Blur behind is off in this shape, and `blurBehindRadius` is cleared with the flag — leaving the radius set is what `dumpsys window` was still reporting as 144.
+- **No idle fullscreen overlay, and no idle tap-marker box.** The edge glow and the tap ring are added only while they are actually drawing, and removed when they go idle, when a capture or an injected gesture needs the screen, or when the ball steps aside. An alpha-0 `MATCH_PARENT` window and an alpha-0 144 dp box were both still in the window list, and on HyperOS both ate touches underneath.
 
 ## [0.5.3] - 2026-10-22
 

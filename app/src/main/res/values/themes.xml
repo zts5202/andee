@@ -69,4 +69,18 @@
     <style name="Theme.Body.Stage.NoPreview" parent="Theme.Body.Stage">
         <item name="android:windowDisablePreview">true</item>
     </style>
+
+    <!--
+      The window that receives system Back while the card is expanded.
+      Not translucent: HyperOS drops a translucent activity out of the back
+      chain. Transparent background and no animation so it does not flash
+      over the card, which is an overlay above this window.
+    -->
+    <style name="Theme.Body.BackCatch" parent="@android:style/Theme.NoTitleBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
 </resources>

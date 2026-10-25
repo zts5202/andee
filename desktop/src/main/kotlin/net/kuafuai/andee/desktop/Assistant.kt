@@ -77,6 +77,7 @@ object Assistant {
     /** Values that must never reach the model or a log: Andee's own keys, then the vault. */
     private fun secrets(): List<Pair<String, String>> = buildList {
         Settings.get("llm_api_key").takeIf { it.length >= 8 }?.let { add("Andee's model key" to it) }
+        Settings.get("mimo_api_key").takeIf { it.length >= 8 }?.let { add("Andee's MiMo key" to it) }
         Settings.get("api_key").takeIf { it.length >= 8 }?.let { add("Andee's voice key" to it) }
         addAll(VaultSecrets.values())
     }
@@ -86,6 +87,18 @@ object Assistant {
 
     fun config(): BrainConfig {
         val mode = Settings.get("brain").let { if (it == BrainConfig.BRAIN_CODEFLYING) it else BrainConfig.BRAIN_LOCAL }
+        val provider = BrainConfig.normalizeProvider(Settings.get("llm_provider"))
+        if (provider == BrainConfig.PROVIDER_MIMO && mode != BrainConfig.BRAIN_CODEFLYING) {
+            return BrainConfig(
+                mode = mode,
+                apiKey = Settings.get("mimo_api_key"),
+                baseUrl = BrainConfig.MIMO_BASE_URL,
+                model = BrainConfig.MIMO_MODEL,
+                thinking = BrainConfig.mimoThinkingOn(Settings.get("mimo_thinking")),
+                reasoningEffort = "high",
+                provider = BrainConfig.PROVIDER_MIMO,
+            )
+        }
         val zh = Strings.lang() == "zh"
         return BrainConfig(
             mode = mode,
@@ -95,8 +108,9 @@ object Assistant {
             },
             model = Settings.get("llm_model").ifEmpty { if (zh) "deepseek-flash" else "gpt-4o-mini" },
             // Unset reads as on, as on the phone (its build default is on); only an explicit "disabled" turns it off.
-            thinking = Settings.get("llm_thinking") != "disabled",
+            thinking = BrainConfig.deepseekThinkingOn(Settings.get("llm_thinking").ifEmpty { null }, "enabled"),
             reasoningEffort = Settings.get("llm_reasoning_effort").ifEmpty { "high" },
+            provider = BrainConfig.PROVIDER_DEEPSEEK,
         )
     }
 

@@ -400,6 +400,8 @@ object SelfCheck {
             level = if (missing) Level.FAIL else Level.OK,
             detail = when {
                 !missing -> R.string.check_detail_brain_on
+                bc.provider == net.kuafuai.andee.config.BrainConfig.PROVIDER_MIMO ->
+                    R.string.check_detail_brain_key_missing_mimo
                 bc.isLocal -> R.string.check_detail_brain_key_missing
                 else -> R.string.check_detail_brain_hub_missing
             },
@@ -452,7 +454,7 @@ object SelfCheck {
                 else R.string.check_detail_skipped_offline,
             )
         }
-        return when (val r = probeBackend(bc.baseUrl, bc.apiKey, bc.model)) {
+        return when (val r = probeBackend(bc.baseUrl, bc.apiKey, bc.model, bc.provider)) {
             is Reach.Ok -> Finding(
                 id = "backend",
                 title = R.string.check_title_model,
@@ -1219,20 +1221,18 @@ object SelfCheck {
      * off. All three misconfigurations are decided by validation, before any
      * generation happens, so there is nothing to learn from letting it write.
      */
-    private fun probeBackend(baseUrl: String, apiKey: String, model: String): Reach {
+    private fun probeBackend(baseUrl: String, apiKey: String, model: String, provider: String): Reach {
         val http = OkHttpClient.Builder()
             .connectTimeout(PROBE_CONNECT_S, TimeUnit.SECONDS)
             .readTimeout(PROBE_READ_S, TimeUnit.SECONDS)
             .build()
-        val auth = "Bearer $apiKey"
 
         val listed: List<String>? = try {
             val req = Request.Builder()
                 .url("$baseUrl/models")
-                .addHeader("Authorization", auth)
                 .get()
-                .build()
-            http.newCall(req).execute().use { resp ->
+            net.kuafuai.andee.brain.LlmClient.authorize(req, provider, apiKey)
+            http.newCall(req.build()).execute().use { resp ->
                 when {
                     resp.isSuccessful -> runCatching {
                         val data = JSONObject(resp.body?.string().orEmpty()).optJSONArray("data")
@@ -1285,11 +1285,10 @@ object SelfCheck {
                 )
             val req = Request.Builder()
                 .url("$baseUrl/chat/completions")
-                .addHeader("Authorization", auth)
                 .addHeader("Content-Type", "application/json")
-                .post(body.toString().toRequestBody(JSON_MEDIA))
-                .build()
-            http.newCall(req).execute().use { resp ->
+            net.kuafuai.andee.brain.LlmClient.authorize(req, provider, apiKey)
+            req.post(body.toString().toRequestBody(JSON_MEDIA))
+            http.newCall(req.build()).execute().use { resp ->
                 when {
                     resp.isSuccessful -> Reach.Ok
                     resp.code == 401 || resp.code == 403 -> Reach.Bad(Kind.KEY, "HTTP ${resp.code}")

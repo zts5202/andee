@@ -498,7 +498,7 @@ object Glass {
      * The same, for a window that stops wanting the blur and later wants it
      * back — [FloatingWindowUi], which is one window in two shapes: a
      * fullscreen card that should frost, and a corner ball that must not
-     * (a blurred 168 dp square hanging around the ball is just a smudge on
+     * (a blurred square hanging around the ball is just a smudge on
      * the user's screen).
      *
      * Unlike the three cards this one is applied with `updateViewLayout` after
@@ -516,6 +516,14 @@ object Glass {
             !wm.isCrossWindowBlurEnabled
         ) {
             p.flags = p.flags and WindowManager.LayoutParams.FLAG_BLUR_BEHIND.inv()
+            // The flag is not the whole story. Leaving the radius set keeps
+            // `dumpsys window` reporting blurBehindRadius, and on HyperOS a
+            // folded ball was measured with that radius still on the window —
+            // a smudge following the ball, on a frame the compositor can treat
+            // as larger than the square we asked for. Zero it whenever the
+            // blur is off. The field is API 31; this branch also runs on 30,
+            // where reading it would throw.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) p.blurBehindRadius = 0
             return false
         }
         p.flags = p.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND

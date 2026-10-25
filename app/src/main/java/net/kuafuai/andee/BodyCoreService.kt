@@ -75,6 +75,16 @@ class BodyCoreService : Service() {
     private lateinit var window: FloatingWindowUi
     private lateinit var ripple: EdgeRippleUi
     private lateinit var marker: net.kuafuai.andee.ui.TapMarkerUi
+
+    /**
+     * The user asked the ball to step aside. The service, the microphone and
+     * accessibility keep running; only the overlays are down. Not persisted:
+     * a process restart ([START_STICKY]) comes back with the ball showing.
+     * Cleared by the notification's "come back" and by [ensureOverlays]
+     * (the launcher icon).
+     */
+    private var ballHidden = false
+
     private var settings: SettingsUi? = null
 
     /**
@@ -365,6 +375,24 @@ class BodyCoreService : Service() {
                 dispatcher.compactForUser()
             }
 
+            override fun onExpandedChanged(expanded: Boolean) {
+                // Park on the way down, bring the catcher back on the way up.
+                // Dismissing here finished the activity on every fold, so the
+                // next unfold was a cold start in the same moment as the resize.
+                syncBackCatcher()
+            }
+
+            override fun wantsNavGesture(): Boolean = wantsBackToFold()
+
+            override fun onNavigateBack() {
+                android.util.Log.i(TAG, "nav: edge back → fold")
+                foldCardFromBack()
+            }
+
+            override fun onNavigateHome() {
+                goHomeFromCard()
+            }
+
             /**
              * Re-show a page from the scrollback, or read a message fullscreen.
              *
@@ -505,11 +533,10 @@ class BodyCoreService : Service() {
         //
         //  * unfolding the card puts a fullscreen overlay on top of it, and the
         //    user who was mid-list reports "I granted it, came back, and I was on
-        //    the assistant" — the list is not gone, it is behind the card;
-        //  * this window is fullscreen *even when the ball is compact*, and it
-        //    swallows the touches it does not use — so a page with a ball in the
-        //    corner is a page whose buttons cannot be pressed. Measured on the
-        //    tablet: 完成 did nothing.
+        //    the assistant" — the list is not gone, it is behind the card.
+        //    The compact ball is not that window anymore: folded, the overlay is
+        //    the ball's own square. This path never stays folded — birth unfolds
+        //    the card just below — so the page still has to be left alone.
         //
         // Nothing is lost by staying out: the page's own exit calls
         // [ensureOverlays], which is what shows this window and unfolds the card.
@@ -538,7 +565,7 @@ class BodyCoreService : Service() {
         // was about *enabling*, and it cost more than it bought. The card is
         // the only thing that shows the scrollback, the control bar and the
         // minimise control, and a device that came back from a reboot showed
-        // none of them: just a 168 dp ball in the corner whose one way in (a
+        // none of them: just a corner ball whose one way in (a
         // long-press) nothing on screen mentions. The user turned this on to
         // have the assistant; it should be there when it starts.
         //
@@ -601,6 +628,15 @@ class BodyCoreService : Service() {
             if (it == 0) android.util.Log.i("Body", "field released the card")
             window.setTypingTop(it)
         }
+        // System Back while the card is up. The overlay does not receive it on
+        // HyperOS; the accessibility key filter and CardBackActivity both land here.
+        net.kuafuai.andee.ui.CardBackActivity.onFold = { foldCardFromBack() }
+        // Home pauses the catcher. The window-state event can land before or
+        // after onPause; both paths fold only once the catcher has actually
+        // been shown and then left, so opening the card on the launcher does
+        // not immediately fold it.
+        net.kuafuai.andee.ui.CardBackActivity.onPaused = { ui.post(catcherLeftHome) }
+        net.kuafuai.andee.ui.OwnCard.onChanged = { syncBackCatcher() }
         asr = AsrController(
             this, audio, window,
             onTranscript = { text, userInitiated ->
@@ -811,6 +847,8 @@ class BodyCoreService : Service() {
         // platform only lets us do from a visible Activity — see
         // [promoteForMicrophone]. The caller is the launcher; the extra is how
         // it says so.
+        if (intent?.getBooleanExtra(EXTRA_HIDE_BALL, false) == true) hideBallForUser()
+        if (intent?.getBooleanExtra(EXTRA_SHOW_BALL, false) == true) showBallForUser()
         if (intent?.getBooleanExtra(EXTRA_MICROPHONE, false) == true) promoteForMicrophone()
         return START_STICKY
     }
@@ -1162,9 +1200,6 @@ class BodyCoreService : Service() {
             net.kuafuai.andee.ui.TextInputActivity.dismiss()
             return
         }
-        // Typing is a conversation, and the conversation is the full card: unfold first, the way the Mac's
-        // double-click brings the chat window up with the cursor in the box.
-        if (window.isCompact()) dispatcher.expand()
         // No keyboard to borrow and nothing to switch: the device's own IME is
         // the user's, and this field types on it like any other app's would.
         // The only way this fails is a tablet whose single IME is the headless
@@ -1177,7 +1212,96 @@ class BodyCoreService : Service() {
             return
         }
         typingFromFullscreen = true
-        net.kuafuai.andee.ui.TextInputActivity.start(this, then)
+        // Unfold and pull the overlay off the bottom of the screen before the
+        // activity exists. Starting it under a fullscreen card is what kept
+        // the IME off the EditText on HyperOS.
+        window.prepareForTyping {
+            // Keys must not come through the accessibility service, and the
+            // catcher must not stay resumed — it would own the IME. Park,
+            // don't finish: finishing is a cold start the next time the card
+            // opens.
+            ScreenBodyService.setKeyFilter(false)
+            net.kuafuai.andee.ui.CardBackActivity.park()
+            net.kuafuai.andee.ui.TextInputActivity.start(this, then)
+        }
+    }
+
+    /**
+     * System Back should fold the expanded card, and nothing else.
+     *
+     * False while typing, while settings/vault is the focused card, while the
+     * ball is folded or hidden. Main thread: the window fields it reads are
+     * only written there, and both callers (the key filter, the catcher
+     * activity) are already on it.
+     */
+    fun wantsBackToFold(): Boolean {
+        if (exitRequested || ballHidden) return false
+        if (!::window.isInitialized || !window.wantsSystemBack()) return false
+        if (net.kuafuai.andee.ui.TextInputActivity.isShowing) return false
+        if (net.kuafuai.andee.ui.OwnCard.showing) return false
+        return true
+    }
+
+    /** Same fold as ✕. Returns false when Back should be left alone. */
+    fun foldCardFromBack(): Boolean {
+        if (!wantsBackToFold() || !::dispatcher.isInitialized) return false
+        // Off before the card has shrunk. A folded ball that still filters
+        // keys makes every key in the app underneath wait on this process.
+        ScreenBodyService.setKeyFilter(false)
+        dispatcher.compactForUser()
+        return true
+    }
+
+    private val backCatcherTick = Runnable { syncBackCatcherNow() }
+
+    /**
+     * Line the back catcher up with the card.
+     *
+     * Folding parks immediately, under the card if it has not shrunk yet, so
+     * the user never sees that window. Unfolding starts it on the next frame:
+     * `startActivity` in the same turn as the overlay resize is the hitch
+     * between the ball and the card. Hiding the ball and stopping the service
+     * still [net.kuafuai.andee.ui.CardBackActivity.dismiss] — park would leave
+     * a resumed window with nothing on screen to explain it.
+     */
+    private fun syncBackCatcher() {
+        ui.removeCallbacks(backCatcherTick)
+        if (!wantsBackToFold()) {
+            ScreenBodyService.setKeyFilter(false)
+            net.kuafuai.andee.ui.CardBackActivity.park()
+            return
+        }
+        ui.post(backCatcherTick)
+    }
+
+    private fun syncBackCatcherNow() {
+        val want = wantsBackToFold()
+        // Off, including while the card is expanded. Turning the filter on
+        // there is what 0.5.7–0.5.9 did, and on HyperOS a service holding
+        // FLAG_REQUEST_FILTER_KEY_EVENTS stops gesture Back and Home from
+        // being generated at all — onKeyEvent then has nothing to fold.
+        // The catcher still receives a real KEYCODE_BACK (3-button, adb).
+        ScreenBodyService.setKeyFilter(false)
+        if (want) net.kuafuai.andee.ui.CardBackActivity.ensure(this)
+        else net.kuafuai.andee.ui.CardBackActivity.park()
+    }
+
+    /**
+     * Finger swipe up on the card. The system never saw it — the overlay is
+     * above the gesture zone — so fold, then ask accessibility for Home.
+     * A Home the system did see (the strip we left clear, or `adb input
+     * keyevent 3`) comes through [noteForegroundPackage] instead and must
+     * not send Home a second time.
+     */
+    private fun goHomeFromCard() {
+        android.util.Log.i(TAG, "nav: upward swipe → fold, then home")
+        if (!foldCardFromBack()) return
+        val svc = ScreenBodyService.get()
+        if (svc == null) {
+            android.util.Log.w(TAG, "nav: no accessibility service, home key not sent")
+            return
+        }
+        svc.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
     }
 
     /**
@@ -1197,7 +1321,7 @@ class BodyCoreService : Service() {
      * a better reason than the user's place does.
      */
     private fun typingFinished() {
-        window.setTypingTop(0)
+        window.endTypingSession()
         window.setAway(false)
         if (typingFromFullscreen && !window.isCompact()) dispatcher.expand()
         typingFromFullscreen = false
@@ -1629,6 +1753,60 @@ class BodyCoreService : Service() {
      */
     fun noteForegroundPackage(pkg: String) {
         maybeAutoEnterScene(pkg)
+        if (!wantsBackToFold()) return
+        // Home must fold and must not start the catcher back over the launcher.
+        // That reorder is why an upward swipe that did reach the system still
+        // looked like nothing: our task was pulled forward and the card was
+        // still covering the display. Fold only after the catcher has been
+        // shown and then left — the launcher is also what's in front in the
+        // moment before the catcher starts, and folding there would close a
+        // card the user just opened. System UI (shade, recents) is not a
+        // destination. Another app may have dropped the catcher, so the back
+        // key still has somewhere to land.
+        when (
+            net.kuafuai.andee.ui.ForegroundNav.action(
+                pkg,
+                packageName,
+                isHomePackage(pkg),
+                net.kuafuai.andee.ui.ForegroundNav.isSystemUi(pkg),
+            )
+        ) {
+            net.kuafuai.andee.ui.ForegroundNav.Action.IGNORE -> Unit
+            net.kuafuai.andee.ui.ForegroundNav.Action.FOLD -> {
+                if (net.kuafuai.andee.ui.CardBackActivity.catcherHasLeft()) {
+                    android.util.Log.i(TAG, "nav: $pkg is home → fold")
+                    foldCardFromBack()
+                }
+            }
+            net.kuafuai.andee.ui.ForegroundNav.Action.CATCH -> syncBackCatcher()
+        }
+    }
+
+    /** Catcher went to the background. If the launcher is what replaced it, fold. */
+    private val catcherLeftHome = Runnable {
+        if (!wantsBackToFold()) return@Runnable
+        if (!net.kuafuai.andee.ui.CardBackActivity.catcherHasLeft()) return@Runnable
+        val pkg = net.kuafuai.andee.device.DeviceState.foregroundPkg ?: return@Runnable
+        if (!isHomePackage(pkg)) return@Runnable
+        android.util.Log.i(TAG, "nav: catcher left, $pkg is home → fold")
+        foldCardFromBack()
+    }
+
+    private var homePackages: Set<String>? = null
+
+    /** Default launcher and every other HOME activity, so a third-party desktop still folds the card. */
+    private fun isHomePackage(pkg: String): Boolean {
+        if (pkg.isEmpty()) return false
+        homePackages?.let { return pkg in it }
+        val intent = android.content.Intent(android.content.Intent.ACTION_MAIN)
+            .addCategory(android.content.Intent.CATEGORY_HOME)
+        val found = packageManager.queryIntentActivities(intent, 0)
+            .mapNotNull { it.activityInfo?.packageName }
+            .toMutableSet()
+        packageManager.resolveActivity(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
+            ?.activityInfo?.packageName?.let { found.add(it) }
+        homePackages = found
+        return pkg in found
     }
 
     /** An accessibility event, still ours to interpret. See [ScreenController.noteEvent]. */
@@ -1672,6 +1850,10 @@ class BodyCoreService : Service() {
         scenesUi?.hide()
         scenesUi = null
         net.kuafuai.andee.config.VoiceConfig.onSceneChanged = null
+        net.kuafuai.andee.ui.CardBackActivity.onFold = null
+        net.kuafuai.andee.ui.CardBackActivity.onPaused = null
+        net.kuafuai.andee.ui.OwnCard.onChanged = null
+        net.kuafuai.andee.ui.CardBackActivity.dismiss()
         // Before the windows go: this one has to put the keyboard back, and a
         // service that dies mid-typing would otherwise leave the tablet with
         // its keyboard on the user's IME — where every future `type_text`
@@ -1842,10 +2024,15 @@ class BodyCoreService : Service() {
     /**
      * The body's own row in the shade. One notification, two states.
      *
-     * **With** the screen: a statement, and nothing to do — it says the
-     * assistant is up, and tapping it opens the app.
+     * **With** the screen, ball showing: it says the assistant is up. Tapping
+     * the row opens the app; **先躲开 / Step aside** takes the overlays down
+     * without stopping this service.
      *
-     * **Without** it: the same row, plus the fix. That action is the entire
+     * **With** the screen, ball hidden: the row is the way back. Tapping it,
+     * or **回来 / Come back**, restores the compact ball. The launcher icon
+     * is the other way back, and that one opens the card.
+     *
+     * **Without** the screen: the same row, plus the fix. That action is the entire
      * return trip, and it is why this is posted by a service rather than by
      * the accessibility service that no longer exists. Today's recovery is
      * "notice the ball is gone → open the app → read the checklist → tap 去开启
@@ -1870,6 +2057,8 @@ class BodyCoreService : Service() {
         // then. Either one means "the screen is ours"; only both being null is
         // worth a red line in the shade.
         val hasScreen = screen != null || ScreenBodyService.get() != null
+        val hidden = ballHidden && hasScreen
+        val meetingLive = hidden && ::meeting.isInitialized && meeting.isActive()
         val openApp = PendingIntent.getActivity(
             this,
             REQ_OPEN_APP,
@@ -1877,20 +2066,37 @@ class BodyCoreService : Service() {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val text = when {
+            !hasScreen -> R.string.body_notify_text_no_screen
+            meetingLive -> R.string.body_notify_text_hidden_meeting
+            hidden -> R.string.body_notify_text_hidden
+            else -> R.string.body_notify_text_ok
+        }
         val b = Notification.Builder(this, CHANNEL_BODY)
             .setSmallIcon(R.drawable.ic_check)
             .setContentTitle(AppLocale.str(this, R.string.body_notify_title))
-            .setContentText(
-                AppLocale.str(
-                    this,
-                    if (hasScreen) R.string.body_notify_text_ok
-                    else R.string.body_notify_text_no_screen,
-                )
-            )
+            .setContentText(AppLocale.str(this, text))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
-            .setContentIntent(openApp)
+            .setContentIntent(if (hidden) ballIntent(show = true) else openApp)
+        if (hasScreen && hidden) {
+            b.addAction(
+                Notification.Action.Builder(
+                    null,
+                    AppLocale.str(this, R.string.body_notify_action_show),
+                    ballIntent(show = true),
+                ).build()
+            )
+        } else if (hasScreen) {
+            b.addAction(
+                Notification.Action.Builder(
+                    null,
+                    AppLocale.str(this, R.string.body_notify_action_hide),
+                    ballIntent(show = false),
+                ).build()
+            )
+        }
         if (!hasScreen) {
             val fix = PendingIntent.getActivity(
                 this,
@@ -1933,6 +2139,22 @@ class BodyCoreService : Service() {
             }
         }
         return b.build()
+    }
+
+    /**
+     * Notification action: hide the overlays, or bring the compact ball back.
+     * Delivered to this service, so it cannot be confused with the launcher
+     * tap, which opens the card.
+     */
+    private fun ballIntent(show: Boolean): PendingIntent {
+        val intent = Intent(this, BodyCoreService::class.java)
+            .putExtra(if (show) EXTRA_SHOW_BALL else EXTRA_HIDE_BALL, true)
+        return PendingIntent.getService(
+            this,
+            if (show) REQ_SHOW_BALL else REQ_HIDE_BALL,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
     }
 
     private fun openSettings() {
@@ -2717,8 +2939,10 @@ class BodyCoreService : Service() {
         }
         android.util.Log.i(
             "Body",
-            "brain=local — skipping outbound client (model=${bc.model} @ ${bc.baseUrl}, " +
-                "thinking=${bc.thinking}/${bc.reasoningEffort}, key=${if (bc.apiKey.isEmpty()) "MISSING" else "set"})",
+            "brain=local provider=${bc.provider} model=${bc.model} @ ${bc.baseUrl}, " +
+                "thinking.type=${if (bc.thinking) "enabled" else "disabled"}" +
+                (if (bc.provider == net.kuafuai.andee.config.BrainConfig.PROVIDER_MIMO) "" else "/${bc.reasoningEffort}") +
+                ", key=${if (bc.apiKey.isEmpty()) "MISSING" else "set"}",
         )
         // Same silence, same explanation as the hub branch above: a local brain
         // with no key answers nothing at all, and "nothing at all" is the one
@@ -3256,6 +3480,12 @@ class BodyCoreService : Service() {
         /** Start-intent extra: also claim the microphone. See [promoteForMicrophone]. */
         private const val EXTRA_MICROPHONE = "microphone"
 
+        /** Notification action: take the overlays down. The service keeps running. */
+        private const val EXTRA_HIDE_BALL = "hide_ball"
+
+        /** Notification action: put the compact ball back. */
+        private const val EXTRA_SHOW_BALL = "show_ball"
+
         /**
          * The body's notification channel, and its one notification id.
          *
@@ -3269,6 +3499,8 @@ class BodyCoreService : Service() {
         private const val REQ_OPEN_APP = 0x0B0D
         private const val REQ_FIX_A11Y = 0x0B0E
         private const val REQ_GRANT_CAPTURE = 0x0B0F
+        private const val REQ_HIDE_BALL = 0x0B10
+        private const val REQ_SHOW_BALL = 0x0B11
 
         /**
          * Begin the body, or hand an already-running one what it was asked for.
@@ -3281,8 +3513,10 @@ class BodyCoreService : Service() {
          *  * `ScreenBodyService` — accessibility just came up, so the body is
          *    wanted regardless of who else asked. This is the one that reaches
          *    a device whose owner never opens the app at all.
-         *  * the notification itself — its content tap opens
-         *    `ui/SelfCheckActivity`, so a pull of the shade is a third way in.
+         *  * the notification itself — while the ball is up, its content tap opens
+         *    `ui/SelfCheckActivity`. While the ball is hidden, that tap (and
+         *    回来 / Come back) is [showBallForUser] instead: the compact ball,
+         *    not the card. 先躲开 / Step aside is the other action on the same row.
          *
          * A late start is wired for rather than guarded against: [onCreate]
          * pulls whatever screen capability already exists, so whichever of the
@@ -3573,11 +3807,16 @@ class BodyCoreService : Service() {
      * re-run [onServiceConnected]. Toggling accessibility off and on was the
      * only cure, which is knowledge no user has.
      *
-     * All three windows are retried, not just the ball: the ripple and the tap
-     * marker were added in the same frame and refused for the same reason, so a
-     * recovery that restored only the ball would come back without the task
-     * light. Each `show()` is idempotent (it returns true early when its view
-     * already exists), so this is safe to call on a healthy service.
+     * The ripple and the marker no longer add a window here. Each `show()` only
+     * reports that it is willing; the glow appears on the next breath and the
+     * ring on the next tap. An idle fullscreen window was the thing blocking
+     * the screen under the ball. Safe to call on a healthy service: a ball that
+     * is already up, and not hidden by the user, returns immediately.
+     *
+     * A ball the user hid ([hideBallForUser]) is not "already up". This is the
+     * launcher's way back, so it clears that and unfolds the card. The
+     * notification's own way back is [showBallForUser], which restores the
+     * corner ball and leaves the card folded.
      *
      * The unfold is the same `setCompact(false)` birth does, for the same
      * reason — the card is what carries the scrollback and the control bar, and
@@ -3599,12 +3838,77 @@ class BodyCoreService : Service() {
         // uses for its 悬浮窗 row, so the two can never disagree: see
         // [net.kuafuai.andee.device.SelfCheck.overlay].
         if (!Settings.canDrawOverlays(this)) return false
-        if (window.isShown()) return true
-        if (!window.show()) return false
+        val restoring = ballHidden
+        if (window.isShown() && !restoring) return true
+        ballHidden = false
+        if (!window.isShown() && !window.show()) {
+            ballHidden = true
+            postNotification()
+            return false
+        }
         window.setCompact(false)
         if (::ripple.isInitialized) ripple.show()
         if (::marker.isInitialized) marker.show()
+        if (restoring) postNotification()
         return true
+    }
+
+    /**
+     * Take every overlay down and leave the service running.
+     *
+     * Not [exitByVoice]: that one stops the body, the microphone and the wake
+     * word. This one is "I'm still here, I'm just not on the screen." The
+     * foreground notification changes to say so, and tapping it is the way
+     * back. A meeting that is recording keeps recording — the shade says that,
+     * because the triple-tap that ends it needs the ball.
+     *
+     * Main thread. The notification actions arrive on it.
+     */
+    private fun hideBallForUser() {
+        if (exitRequested) return
+        ballHidden = true
+        net.kuafuai.andee.ui.CardBackActivity.dismiss()
+        if (::window.isInitialized) window.hide()
+        if (::ripple.isInitialized) ripple.hide()
+        if (::marker.isInitialized) marker.hide()
+        // yielding: closing the checklist from here must not unfold the card
+        // we just took down. That callback is "the user finished the list".
+        settings?.hide()
+        selfCheck?.hide(yielding = true)
+        artifactsUi?.hide()
+        artifactsUi = null
+        scenesUi?.hide()
+        scenesUi = null
+        net.kuafuai.andee.ui.CardUi.dismissCurrent()
+        postNotification()
+        android.util.Log.i(TAG, "ball hidden; service still running")
+    }
+
+    /**
+     * Put the corner ball back. The card stays folded — opening the launcher
+     * is what unfolds it ([ensureOverlays]).
+     *
+     * Main thread.
+     */
+    private fun showBallForUser() {
+        if (exitRequested || !::window.isInitialized) return
+        if (!Settings.canDrawOverlays(this)) {
+            ballHidden = true
+            postNotification()
+            return
+        }
+        ballHidden = false
+        if (!window.isShown() && !window.show()) {
+            ballHidden = true
+            postNotification()
+            android.util.Log.e(TAG, "ball restore refused: no window")
+            return
+        }
+        window.setCompact(true)
+        if (::ripple.isInitialized) ripple.show()
+        if (::marker.isInitialized) marker.show()
+        postNotification()
+        android.util.Log.i(TAG, "ball restored")
     }
 
     /**

@@ -97,12 +97,22 @@ object OwnCard {
 
     val showing: Boolean get() = depth.get() > 0
 
+    /**
+     * Settings, the vault and the other focusable cards. The back catcher has
+     * to step aside while one of them is up, or a Back key folds the chat
+     * card underneath the sheet the user is looking at.
+     */
+    @Volatile
+    var onChanged: (() -> Unit)? = null
+
     fun shown() {
         depth.incrementAndGet()
+        onChanged?.invoke()
     }
 
     fun hidden() {
         depth.updateAndGet { if (it > 0) it - 1 else 0 }
+        onChanged?.invoke()
     }
 }
 
@@ -110,14 +120,19 @@ object OwnCard {
  * Whether the assistant's own card is unfolded over the whole display.
  *
  * A second way to get zero nodes, by a different mechanism than [OwnCard] and
- * with a different answer. The card is `FLAG_NOT_FOCUSABLE`, so it never
- * becomes the active window and the app behind it stays focused and keeps its
- * root — but it *covers* the display, and every node of an occluded window
- * reports `isVisibleToUser == false`. [ScreenController.buildNode] drops those
- * before it counts them, so `nodes_total` is 0 with a perfectly healthy tree
- * underneath. Measured on this device: with the card unfolded, Chrome's window
- * is present, `active`, `focused`, `root: true` and yields 0 nodes; folding the
- * card returns 75 from the same screen.
+ * with a different answer. The card is `FLAG_NOT_FOCUSABLE`, so it is not the
+ * focused window — but it *covers* the display, and every node of an occluded
+ * window reports `isVisibleToUser == false`. [ScreenController.buildNode] drops
+ * those before it counts them, so `nodes_total` is 0 with a perfectly healthy
+ * tree underneath. Measured on this device: with the card unfolded, the app
+ * behind can still be the focused one and yields 0 nodes; folding the card
+ * returns the tree. The empty dump is the cover. Do not drop
+ * `FLAG_NOT_FOCUSABLE` to catch system Back: on HyperOS the gesture follows the
+ * focused activity, not this overlay, and a focusable card keeps the typing
+ * IME off the field. A finger back-swipe is classified on the card
+ * ([net.kuafuai.andee.ui.NavGesture]); a real Back key is
+ * [net.kuafuai.andee.ui.CardBackActivity]. The accessibility key filter stays
+ * off — on HyperOS it stops gesture Back and Home from being generated.
  *
  * It exists because that is the same signature [ScreenController.reviveNote]
  * reads as a stale accessibility connection, and it sent a user off to toggle a
